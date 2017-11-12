@@ -1,0 +1,382 @@
+6 Formlet：实用的表单（Form）抽象
+
+(require web-server/formlets)											package: web-server-lib
+Web服务器提供了一种称为formlet的Web表单抽象。
+
+6.1基本使用
+假设我们要创建一个在HTML表单中输入日期的抽象。 以下formlet实现了这个想法：
+(define date-formlet
+  (formlet
+   (div "Month:" ,{input-int . => . month}
+        "Day:" ,{input-int . => . day})
+   (list month day)))
+formlet语法的第一部分是作为formlet的呈现的X表达式的模板。 它可以包含像（=> formlet name）这样的元素，其中formlet是一个formlet表达式，name是一个在formlet语法的第二部分中绑定的标识符。
+此formlet将作为以下X表达式从（列表）被显示（使用formlet显示）：
+(list
+ '(div "Month:" (input ([name "input_0"]))
+       "Day:" (input ([name "input_1"]))))
+date-formlet不仅捕获了表单的呈现，而且还捕获了请求处理逻辑。 如果我们使用formlet-process向其发送一个带有“input_0”绑定到“10”和“input_1”绑定到“3”的HTTP请求，那么它返回：
+(list 10 3)
+这是formlet语法的第二部分，其中month已经被由“input_0”表示的整数替代，而day已经被由“input_1”表示的整数替换。
+formlet的真正力量在于它们可以彼此嵌入。 例如，假设我们要组合两个日期表单来捕捉旅行行程。 以下formlet执行作业：
+(define travel-formlet
+  (formlet
+   (div
+    "Name:" ,{input-string . => . name}
+    (div
+     "Arrive:" ,{date-formlet . => . arrive}
+     "Depart:" ,{date-formlet . => . depart})
+   (list name arrive depart))))
+（注意，日期格式被嵌入两次。）这被呈现为：
+(list
+ '(div
+   "Name:"
+   (input ([name "input_0"]))
+   (div
+    "Arrive:"
+    (div "Month:" (input ([name "input_1"]))
+         "Day:" (input ([name "input_2"])))
+    "Depart:"
+    (div "Month:" (input ([name "input_3"]))
+         "Day:" (input ([name "input_4"]))))))
+观察到formlet显示已自动为每个输入元素生成唯一的名称。 当我们将这些名称的绑定传递给formlet-process时，将返回以下列表：
+(list "Jay"
+      (list 10 3)
+      (list 10 6))
+在所有这些例子中，我们使用了input-int和input-string formlet。 在这些位置可以使用formlet契约的任何值。 例如，（to-string（required（text-input）））也可以使用。 本手册的其余部分给出了formlet使用，扩展和现有formlet组合器的详细信息。
+
+6.2静态句法短语
+(require web-server/formlets/syntax)							package: web-server-lib
+大多数用户想要使用语法简写来创建formlets。
+
+(formlet rendering-xexpr yields-expr)												语法
+构造具有指定的rendering-xexpr的formlet，处理结果是yield-expr表达式的求值。 rendering-xexpr形式是一个quasiquote句法X表达式，有三个特殊的注意事项：
+,{=> formlet-expr name}嵌入由formlet-expr给出的formlet；处理这个formlet的结果在yield-expr中是可用的。
+,{=> formlet-expr（values name ...）}嵌入由formlet-expr给出的formlet；处理这个formlet的结果在yield-expr中以名称……
+(＃％＃xexpr ...)呈现X表达式从。
+这些形式可能不会嵌套在无引号或无引号拼接中。 例如，这是非法的：
+(formlet (div ,@(for/list ([i (in-range 10)])
+                  `(p ,((text-input) . => . name))))
+         name)
+
+#%#																				语法
+只允许在formlet和formlet *内。
+
+6.3动态语法缩写
+(require web-server/formlets/dyn-syntax)						package: web-server-lib
+formlet语法对于某些应用程序来说太局限了，因为它强制渲染在语法上是一个X表达式。 你可能会发现你想使用更“动态”的速记。
+
+(formlet* rendering-expr yields-expr)												语法
+构造一个formlet，其中rendering-expr被评估（具有注意事项）以构造渲染，并且处理结果是yield-expr表达式的评估。 rendering-expr应该求值为一个“X-expression”，它可以嵌入以下形式的结果，这些形式在formlet *中只有意义：
+{=> * formlet-expr name}嵌入formlet-expr给出的formlet；处理这个formlet的结果在yield-expr中是可用的。
+{=> * formlet-expr（values name ...）}嵌入formlet-expr给出的formlet；处理这个formlet的结果在yield-expr中以name……
+（＃％＃xexpr-expr ...）渲染X表达式丛。
+这些形式中的每一个都评估为一个不透明的值，rendering-expr不能以任何方式操作，但是如果它作为“X表达式”的一部分返回到formlet *，它将被渲染，并且将执行formlets处理阶段，等等。
+因为这些形式可能出现在rendering-expr中的任何地方，它们可能会重复。因此，小单元可以多次渲染（并且被处理）。因此，在yield-expr中，formlet结果名称绑定到结果列表，而不是如formlet中的单个结果。结果列表根据rendering-expr结果中formlet的顺序排序。例如，in
+(formlet* `(div ,@(for/list ([i (in-range 1 10)])
+                    `(p ,(number->string i)
+                        ,((text-input) . =>* . name))))
+          name)
+name绑定到字符串列表，而不是单个字符串，其中第一个元素是在Web页面上的字符串1旁边输入的字符串。
+在这个例子中，很明显这是所需的行为。 然而，有时候一个formlet的结果的值可能是令人惊讶的。 例如，in
+(formlet* `(div (p ,((text-input) . =>* . name)))
+          name)
+name绑定到字符串列表，因为formlet *无法在语法上确定结果绑定到name的formlet是否使用了很多次。
+
+=>*																				语法
+只允许在formlet *内。
+
+6.4功能使用
+(require web-server/formlets/lib)								package: web-server-lib
+句法简写用以下库来缩写formlet的构造。 这些组合器可以直接用于构造低阶的 formlets，例如用于新的INPUT元件类型的 formlets。 参考预定义的格式，例如使用这些组合器的低阶格式。
+
+xexpr-forest/c : contract?															值
+等价于（xexpr / c的列表）。
+
+ (formlet/c content ...) → contract?
+  content : any/c																	程序
+等同于 (-> integer? (values xexpr-forest/c (-> (listof binding?) (values (coerce-contract 'formlet/c content) ...)) integer?))。
+formlet的内部表示是从初始输入数到X表达式丛的渲染，处理函数和下一个允许的输入数的函数。
+
+formlet * / c：contract？															值
+等同于（formlet / c any / c ...）。
+
+(pure value) → (formlet/c any/c)
+      value : any/c																	程序
+构造一个没有渲染的formlet，并且始终在处理阶段返回值。
+
+(cross f g) → (formlet/c any/c ...)
+  f : (formlet/c procedure?)
+  g : (formlet/c any/c …)															程序
+构造一个formlet，其渲染等于formlet f和g的渲染的连接；处理阶段，其将g的处理结果应用于f的处理结果。
+
+ (cross* f g ...) → (formlet/c any/c)
+  f : (formlet/c (() () #:rest (listof any/c) . ->* . any/c))
+  g : (formlet/c any/c)																程序
+相当于交叉提出了许多论点。
+
+(xml-forest r) → (formlet/c procedure?)
+  r : xexpr-forest/c																	程序
+构造具有渲染r和身份过程作为处理步骤。
+
+(xml r) → (formlet/c procedure?)
+  r : xexpr/c																			程序
+等同于 (xml-forest (list r))。
+
+(text r) → (formlet/c procedure?)
+  r : string?																			程序
+相当于 (xml r)。
+
+(tag-xexpr tag attrs inner) → (formlet/c any/c)
+  tag : symbol?
+  attrs : (listof (list/c symbol? string?))
+  inner : (formlet/c any/c)															程序
+使用渲染 (list (list* tag attrs inner-rendering))构造一个formlet，其中inner-rendering是inner的渲染，而处理阶段与inner的渲染相同。
+
+ (formlet-display f) → xexpr-forest/c
+  f : (formlet/c any/c)																程序
+渲染f。
+
+(formlet-process f r)	 	→	 	
+    any/c	 	...
+  f : (formlet/c any/c ...)
+  r : request?																		程序
+对r中的绑定运行f的处理阶段。
+
+6.5预定义格式
+(require web-server/formlets/input)							package: web-server-lib
+这些formlets是表单输入的主要组合器。
+
+(make-input render) → (formlet/c (or/c false/c binding?))
+  render : (string? . -> . xexpr/c)													程序
+这个formlet使用render渲染，它传递输入名称，并导致提取的绑定。
+
+(make-input* render) → (formlet/c (listof binding?))
+  render : (string? . -> . xexpr/c)													程序
+这个formlet使用render渲染，它传递输入名称，并导致使用该名称的所有绑定。
+
+(input	 	#:type type	 															程序
+     	 [	#:value value	 
+     	 	#:size size	 
+     	 	#:max-length max-length	 
+     	 	#:read-only? read-only?	 
+     	 	#:attributes attrs])	 
+
+ → (formlet/c (or/c false/c binding?))
+  type : string?
+  value : (or/c false/c bytes? string?) = #f
+  size : (or/c false/c exact-nonnegative-integer?) = #f
+  max-length : (or/c false/c exact-nonnegative-integer?) = #f
+  read-only? : boolean? = #f
+  attrs : (listof (list/c symbol? string?)) = empty
+这个formlet使用具有指定类型和参数的INPUT元素进行渲染。
+
+(text-input	 [	#:value value	 													程序
+     	 	#:size size	 
+     	 	#:max-length max-length	 
+     	 	#:read-only? read-only?	 
+     	 	#:attributes attrs])	 
+ → (formlet/c (or/c false/c binding?))
+  value : (or/c false/c bytes? string?) = #f
+  size : (or/c false/c exact-nonnegative-integer?) = #f
+  max-length : (or/c false/c exact-nonnegative-integer?) = #f
+  read-only? : boolean? = #f
+  attrs : (listof (list/c symbol? string?)) = empty
+这个formlet使用具有TEXT类型和参数中给出的属性的INPUT元素进行渲染。
+
+(password-input	 [	#:value value	 											程序
+     	 	#:size size	 
+     	 	#:max-length max-length	 
+     	 	#:read-only? read-only?	 
+     	 	#:attributes attrs])	 
+ → (formlet/c (or/c false/c binding?))
+  value : (or/c false/c bytes? string?) = #f
+  size : (or/c false/c exact-nonnegative-integer?) = #f
+  max-length : (or/c false/c exact-nonnegative-integer?) = #f
+  read-only? : boolean? = #f
+  attrs : (listof (list/c symbol? string?)) = empty
+这个formlet使用具有PASSWORD类型和参数中给出的属性的INPUT元素进行渲染。
+
+(textarea-input	 [	#:value value	 												程序
+     	 	#:rows rows	 
+     	 	#:cols cols	 
+     	 	#:attributes attrs])	 
+
+ → (formlet/c (or/c false/c binding?))
+  value : (or/c false/c bytes? string?) = #f
+  rows : (or/c false/c number?) = #f
+  cols : (or/c false/c number?) = #f
+  attrs : (listof (list/c symbol? string?)) = empty
+这个formlet使用具有在参数中给出的属性的TEXTAREA元素来呈现。
+
+(checkbox value checked? [#:attributes attrs])										程序
+ → (formlet/c (or/c false/c binding?))
+  value : (or/c bytes? string?)
+  checked? : boolean?
+  attrs : (listof (list/c symbol? string?)) = empty
+这个formlet使用具有CHECKBOX类型的INPUT元素和参数中给出的属性进行渲染。
+
+(radio value checked? [#:attributes attrs])											程序
+ → (formlet/c (or/c false/c binding?))
+  value : (or/c bytes? string?)
+  checked? : boolean?
+  attrs : (listof (list/c symbol? string?)) = empty
+这个formlet使用具有RADIO类型和参数中给出的属性的INPUT元素进行渲染。
+
+(radio-group	 	l	 	 	 	 												程序
+     	 [	#:attributes attrs	 	 	 	 
+     	 	#:checked? checked?	 	 	 	 
+     	 	#:display display	 	 	 	 
+     	 	#:wrap wrap])	 	→	 	(formlet/c any/c)
+  l : sequence?
+  	attrs	 	:	 	(any/c . -> . (listof (list/c symbol? string?)))
+ 	 	 	=	 	(λ (x) empty)
+  checked? : (any/c . -> . boolean?) = (λ (x) #f)
+  display : (any/c . -> . xexpr/c) = (λ (x) x)
+  wrap : (any/c any/c . -> . xexpr/c) = (λ (x y) (list x y))
+这个formlet使用RADIO类型的INPUT元素序列来渲染，其中每个元素从共享单个NAME的attrs获取其属性。 如果选中则checked? 返回#t。 元素与显示的结果合并为wrap中指定的X表达式。 处理这个formlet的结果是序列的单个元素。
+
+(checkbox-group	 	l	 														程序
+     	 [	#:attributes attrs	 
+     	 	#:checked? checked?	 
+     	 	#:display display])	 
+ → (formlet/c (listof any/c))
+  l : sequence?
+  	attrs	 	:	 	(any/c . -> . (listof (list/c symbol? string?)))
+ 	 	 	=	 	(λ (x) empty)
+  checked? : (any/c . -> . boolean?) = (λ (x) #f)
+  display : (any/c . -> . xexpr/c) = (λ (x) x)
+这个formlet使用CHECKBOX类型的INPUT元素序列呈现，其中每个元素从共享单个NAME的attrs获取其属性。 如果选中则checked? 返回#t。 元素后面是显示结果。 处理这个formlet的结果是序列的元素的列表。
+
+(submit value [#:attributes attrs])													程序
+ → (formlet/c (or/c false/c binding?))
+  value : (or/c bytes? string?)
+  attrs : (listof (list/c symbol? string?)) = empty
+这个formlet使用具有SUBMIT类型和参数中给出的属性的INPUT元素进行渲染。
+
+(reset value [#:attributes attrs])													程序
+ → (formlet/c (or/c false/c binding?))
+  value : (or/c bytes? string?)
+  attrs : (listof (list/c symbol? string?)) = empty
+这个formlet使用具有RESET类型和参数中给出的属性的INPUT元素进行渲染。
+
+(file-upload [#:attributes attrs])													程序
+ → (formlet/c (or/c false/c binding?))
+  attrs : (listof (list/c symbol? string?)) = empty
+这个formlet使用具有FILE类型和参数中给出的属性的INPUT元素进行渲染。
+
+(hidden value [#:attributes attrs])													程序
+ → (formlet/c (or/c false/c binding?))
+  value : (or/c bytes? string?)
+  attrs : (listof (list/c symbol? string?)) = empty
+这个formlet使用具有HIDDEN类型的INPUT元素和参数中给出的属性来渲染。
+
+(img	 	alt	 	 	 	 														程序
+     	 	src	 	 	 	 
+     	 [	#:height height	 	 	 	 
+     	 	#:longdesc ldesc	 	 	 	 
+     	 	#:usemap map	 	 	 	 
+     	 	#:width width	 	 	 	 
+     	 	#:attributes attrs])	
+→	 	(formlet/c (or/c false/c binding?))
+  alt : (or/c bytes? string?)
+  src : (or/c bytes? string?)
+  height : (or/c false/c exact-nonnegative-integer?) = #f
+  ldesc : (or/c false/c bytes? string?) = #f
+  map : (or/c false/c bytes? string?) = #f
+  width : (or/c false/c exact-nonnegative-integer?) = #f
+  attrs : (listof (list/c symbol? string?)) = empty
+这个formlet使用具有参数中给出的属性的IMG元素进行渲染。
+
+(button	 	type	 																程序
+     	 	button-text	 
+     	 [	#:disabled disabled	 
+     	 	#:value value	 
+     	 	#:attributes attrs])	  → (formlet/c (or/c false/c binding?))
+  type : (or/c bytes? string?)
+  button-text : (or/c bytes? string?)
+  disabled : boolean? = #f
+  value : (or/c false/c bytes? string?) = #f
+  attrs : (listof (list/c symbol? string?)) = empty
+这个formlet使用具有参数中给出的属性的BUTTON元素来渲染。 button-text是呈现时将出现在按钮上的文本。
+
+(multiselect-input	 	l	 	 	 	 											程序
+     	 [	#:attributes attrs	 	 	 	 
+     	 	#:multiple? multiple?	 	 	 	 
+     	 	#:selected? selected?	 	 	 	 
+     	 	#:display display])	 	→	 	(formlet/c list?)
+  l : sequence?
+  attrs : (listof (list/c symbol? string?)) = empty
+  multiple? : boolean? = #t
+  selected? : (any/c . -> . boolean?) = (λ (x) #f)
+  display : (any/c . -> . xexpr/c) = (λ (x) x)
+这个formlet使用具有为序列的每个元素的OPTION给出的属性的SELECT元素来呈现。 如果 multiple? 是#t，则可以选择多个选项。一个被选择的元素如果selected? 返回#t。 元素与display一起显示。
+
+(select-input	 	l	 	 	 	 												程序
+     	 [	#:attributes attrs	 	 	 	 
+     	 	#:selected? selected?	 	 	 	 
+     	 	#:display display])	 	→	 	(formlet/c any/c)
+  l : sequence?
+  attrs : (listof (list/c symbol? string?)) = empty
+  selected? : (any/c . -> . boolean?) = (λ (x) #f)
+  display : (any/c . -> . xexpr/c) = (λ (x) x)
+这个formlet使用具有为序列的每个元素的OPTION给出的属性的SELECT元素来呈现。 一个被选择的元素如果selected? 返回#t。 元素与显示一起显示。
+
+(required f) → (formlet/c bytes?)													程序
+  f : (formlet/c (or/c false/c binding?))
+构造一个formlet，从由f产生的绑定或错误中提取binding:form-value。
+
+(default def f) → (formlet/c bytes?)												程序
+  def : bytes?
+  f : (formlet/c (or/c false/c binding?))
+构造一个formlet，从f产生的绑定中提取binding:form-value，或返回def。
+
+(to-string f) → (formlet/c string?)													程序
+  f : (formlet/c bytes?)
+将f的输出转换为字符串。 等价于 (cross (pure bytes->string/utf-8) f)。
+
+(to-number f) → (formlet/c number?)												程序
+  f : (formlet/c string?)
+将f的输出转换为数字。 等价于 (cross (pure string->number) f)。
+
+(to-symbol f) → (formlet/c symbol?)												程序
+  f : (formlet/c string?)
+将f的输出转换为符号。 等价于 (cross (pure string->symbol) f)。
+
+(to-boolean f) → (formlet/c boolean?)												程序
+  f : (formlet/c bytes?)
+如果它等于#"on"，将f的输出转换为布尔值。
+
+input-string : (formlet/c string?)													值
+等效于 (to-string (required (text-input)))。
+
+input-string : (formlet/c string?)													值
+等效于 (to-string (required (text-input)))。
+
+input-int : (formlet/c integer?)														值
+等效于 (to-number input-string)。
+
+input-symbol : (formlet/c symbol?)												值
+等效于 (to-symbol input-string)。
+
+6.6公用事业
+ (require web-server/formlets/servlet)							package: web-server-lib
+提供了一些在Web应用程序中使用Formlet的实用程序。
+
+(send/formlet	 	f	 	 	 	 												程序
+     	 [	#:method method	 	 	 	 
+     	 	#:wrap wrapper])	 	→	 	
+    any/c	 	...
+  f : (formlet/c any/c ...)
+  method : (or/c "GET" "POST" "get" "post") = "POST"
+  	wrapper	 	:	 	(xexpr/c . -> . xexpr/c)
+ 	 	 	=	 	
+(lambda (form-xexpr)
+  `(html (head (title "Form Entry"))
+         (body ,form-xexpr)))
+使用send/suspend和response/xexpr来发送f的渲染（包含在一个FORM标签中，该方法的方法是扩展URL（再次被wrapper包装））到客户端。 当表单提交时，请求被传递到f的处理阶段。
+
+(embed-formlet embed/url f) → xexpr/c											程序
+  embed/url : ((request? . -> . any) . -> . string?)
+  f : (formlet/c any/c …)
+类似send/formlet，但用于send/suspend/dispatch。
