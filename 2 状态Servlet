@@ -1,0 +1,370 @@
+2状态Servlet
+
+(require web-server/servlet)									package: web-server-lib
+有状态的servlet应该提供以下导出：
+
+interface-version : (one-of/c 'v2)												值
+这表示servlet是一个版本2的servlet。
+
+manager : manager?																值
+这个servlet的继承的管理器。有关选项，请参阅扩展管理器。
+
+(start initial-request) → can-be-response?
+initial-request : request?														程序
+当此servlet的实例启动时调用此函数。 参数是启动实例的HTTP请求。
+示例版本2模块：
+#lang racket
+(require web-server/http
+         web-server/managers/none)
+(provide interface-version manager start)
+ 
+(define interface-version 'v2)
+(define manager
+  (create-none-manager
+   (lambda (req)
+     (response/xexpr
+      `(html (head (title "No Continuations Here!"))
+             (body (h1 "No Continuations Here!")))))))
+(define (start req)
+  (response/xexpr
+   `(html (head (title "Hello World!"))
+          (body (h1 "Hi Mom!")))))
+这些servlet有一个可用的扩展API：net/url，web-server/http，web-server/http/bindings，web-server/servlet/servlet-structs，web-server/servlet/web，web- servlet/web单元格和web-server/dispatch。 其中一些记录在随后的子节中。
+
+2.2回应
+(require web-server/servlet/servlet-structs)		package: web-server-lib
+Servlet通过返回HTTP响应与Web服务器通信。 为了适应轻量级程序（和向后兼容性），Web服务器提供了从应用程序特定的响应格式和内部HTTP响应格式响应的间接方式。
+
+(can-be-response? x) → boolean?
+  x : any/c																			程序
+
+(any->response x) → (or/c false/c response?)
+  x : any/c																			程序
+
+(set-any->response! new-any->response) → void
+  new-any->response : (-> any/c (or/c false/c response?))							程序
+any-> response将任何值强制到响应中或如果强制不可能则返回#f。 any-> response保证任何 response?输入必须总是精确返回（即eq?）。默认值总是返回#f，表示不可以强制。
+如果x是一个响应或可以通过调用any->response变成响应can-be-response? 返回#t。
+any-> response的用户应该通过使用can-be-response来保护自己?作为合同。如果他们这样做，他们可以安全地忽略#f返回any-> response的情况。
+set-any-> response!用提供的参数替换全局any->response。此函数应为eq?返回相同的值？输入以确保can-be-response?是任何准确的谓词。类似地，该函数在同一输入上调用多次时应该很便宜，因为它将在传输之前用于合同检查以及强制。您可能希望使用基于弱eq?的哈希表来缓存结果以实现此目的。 （参见make-weak-hasheq。）
+
+2.3 Web交互
+(require web-server/servlet/web)					package: web-server-lib
+web-server/servlet/web库提供servlet开发人员感兴趣的主要功能。
+
+(send/back response) → void?
+  response : can-be-response?												程序
+向客户端发送响应。 没有捕获到延续，所以servlet完成。
+例：
+(send/back
+ (response/xexpr
+  `(html
+    (body
+     (h1 "The sum is: "
+         ,(+ first-number
+             second-number))))))
+
+(send/suspend make-response) → request?
+  make-response : (string? . -> . can-be-response?)						程序
+捕获当前连接，将exp存储为到期处理程序，并将其绑定到URL。 使用此URL调用make-response，并期望生成发送给客户端的can-be-response?。 如果调用继续URL，则调用捕获的继续，并从该调用返回请求以send/suspend。
+例：
+(send/suspend
+ (lambda (k-url)
+   (response/xexpr
+    `(html (head (title "Enter a number"))
+           (body
+            (form ([action ,k-url])
+                  "Enter a number: "
+                  (input ([name "number"]))
+                  (input ([type "submit"]))))))))
+当此表单由浏览器提交时，请求将发送到由send/suspend生成的URL。 因此，请求将从send/suspend“返回”到该调用的扩展。
+
+(send/suspend/url make-response) → request?
+  make-response : (url? . -> . can-be-response?)							程序
+类似send/suspend，但有一个URL结构。
+
+(send/suspend/dispatch make-response) → any
+  make-response : (((request? . -> . any) . -> . string?) . -> . can-be-response?)																		程序
+使用函数（通常称为embed/url）调用make-response，当从request?到any/c调用过程会生成一个URL，当呼叫时将调用该函数的request? 对象并将结果返回给send/suspend/dispatch的调用者。因此，如果你传入embed/url的身份函数，send/suspend/dispatch就会转为send/suspend：
+(define (send/suspend response-generator)
+  (send/suspend/dispatch
+   (lambda (embed/url)
+     (response-generator (embed/url (lambda (x) x))))))
+当页面有多个“逻辑”连续时，请使用send/suspend/dispatch。 例如，我们可以添加一个数字或减去它：
+(define (count-dot-com i)
+  (count-dot-com
+   (send/suspend/dispatch
+    (lambda (embed/url)
+      (response/xexpr
+       `(html
+         (head (title "Count!"))
+         (body
+          (h2 (a ([href
+                   ,(embed/url
+                     (lambda (req)
+                       (sub1 i)))])
+                 "-"))
+          (h1 ,(number->string i))
+          (h2 (a ([href
+                   ,(embed/url
+                     (lambda (req)
+                       (add1 i)))])
+                 "+")))))))))
+注意在这个例子中，处理程序的结果返回到send/suspend/dispatch的继续。然而，很常见的send/suspend/dispatch的返回值在你的应用程序是不相关的，你可能会认为它是“嵌入”无价值的回调。 这里是同样的样式：
+(define (count-dot-com i)
+  (send/suspend/dispatch
+   (lambda (embed/url)
+     (response/xexpr
+      `(html
+        (head (title "Count!"))
+        (body
+         (h2 (a ([href
+                  ,(embed/url
+                    (lambda (req)
+                      (count-dot-com (sub1 i))))])
+                "-"))
+         (h1 ,(number->string i))
+         (h2 (a ([href
+                  ,(embed/url
+                    (lambda (req)
+                      (count-dot-com (add1 i))))])
+                "+"))))))))
+
+(send/suspend/url/dispatch make-response) → any
+  make-response : (((request? . -> . any) . -> . url?) . -> . can-be-response?)		程序
+像send/suspend/dispatch，但是带有一个URL结构体。
+
+(send/forward make-response) → request?
+  make-response : (string? . -> . can-be-response?)									程序
+调用clear-continuation-table!，然后 send/suspend。
+如果用户可以在逻辑上在应用程序中“前进”，但不能向后移动，请使用此选项。
+
+(send/finish response) → void?
+  response : can-be-response?														程序
+调用clear-continuation-table!，然后send/back。
+如果用户对您的应用程序真正“完成”，则使用此方法。 例如，它可以用于显示post-logout页面：
+(send/finish
+ (response/xexpr
+  `(html (head (title "Logged out"))
+         (body (p "Thank you for using the services "
+                  "of the Add Two Numbers, Inc.")))))
+
+(redirect/get [#:headers hs]) → request?
+  hs : (listof header?) = empty														程序
+用redirect-to调用send/suspend，作为headers通过hs。
+这实现了Post-Redirect-Get模式。 使用此选项可防止“刷新”按钮重复提交效果，比如将项目添加到数据库。
+
+(redirect/get/forget [#:headers hs]) → request?
+  hs : (listof header?) = empty														程序
+调用send/forward与redirect-to，传递hs作为headers。
+
+current-servlet-continuation-expiration-handler 
+ : (parameter/c (or/c false/c
+                   (request? . -> . can-be-response?)))										值
+保存在此上下文中捕获的延续过期时使用的到期处理程序，然后查找。
+例：
+(parameterize
+    ([current-servlet-continuation-expiration-handler
+      (lambda (req)
+        (response/xexpr
+         `(html (head (title "Custom Expiration!")))))])
+  (send/suspend
+   .…))
+
+(clear-continuation-table!) → void?												程序
+调用servlet的管理程序的clear-continuation-table! 功能。 通常，这将删除所有以前捕获的扩展器。
+
+(with-errors-to-browser	 	send/finish-or-back	 	 	 	 
+     	 	thunk)	 	→	 	any
+  send/finish-or-back : (can-be-response? . -> . request?)
+  thunk : (-> any)																	程序
+使用生成HTML错误页面并调用send/finish-or-back的异常处理程序调用thunk。
+例：
+(with-errors-to-browser
+ send/back
+ (lambda ()
+   (/ 1 (get-number (request-number)))))
+
+(adjust-timeout! t) → void?
+  t : number?																		程序
+调用servlet的管理器的adjust-timeout! 功能。
+警告：这已过时，将在以后的版本中删除。
+
+(continuation-url? u)
+ → (or/c false/c (list/c number? number? number?))
+  u : url?																			程序
+检查u是否是引用延续的URL，如果是，则返回实例ID，继续ID和随机数。
+
+servlet-prompt : continuation-prompt-tag?										值
+用于Web交互扩展捕获的标记。
+
+2.4网络单元
+ (require web-server/servlet/web-cells) 						package: web-server-lib
+web-server/servlet/web-cells库提供了Web单元的接口。Web单元格是相对于框架树定义的一种状态。 框架树是用户的浏览会话的镜像。每次调用延续时，当捕获连续时，将创建一个新帧（称为当前帧）作为当前帧的子项。如果您希望将效果封装在从生成的HTTP响应链接的所有交互（在传递意义上），则应使用Web单元格。 有关其语义的更多信息，请参阅“Web的交互安全状态”一文。
+
+(web-cell? v) → boolean?
+  v : any/c																			程序
+确定v是否是Web单元格。
+
+(make-web-cell v) → web-cell?
+  v : any/c																			程序
+创建默认值为v的Web单元格。
+
+(web-cell-ref wc) → any/c
+  wc : web-cell?																	程序
+查找在最近的框架中找到的wc的值。
+
+(web-cell-shadow wc v) → void
+  wc : web-cell?
+  v : any/c																			程序
+在当前帧中绑定wc到v，在当前帧中确保任何其他绑定到wc。
+下面是一个扩展示例，演示了Web单元如何允许创建可重用的Web抽象，而不需要将程序全局变换为扩展或存储来传递风格。
+#lang web-server/insta
+ 
+(define (start initial-request)
+  (define counter1 (make-counter))
+  (define counter2 (make-counter))
+  (define include1 (include-counter counter1))
+  (define include2 (include-counter counter2))
+  (send/suspend/dispatch
+   (lambda (embed/url)
+     (response/xexpr
+      `(html
+        (body (h2 "Double Counters")
+              (div (h3 "First")
+                   ,(include1 embed/url))
+              (div (h3 "Second")
+                   ,(include2 embed/url))))))))
+ 
+(define (make-counter)
+ (make-web-cell 0))
+ 
+(define (include-counter a-counter)
+ (call-with-current-continuation
+  (λ (k)
+    (let loop ()
+      (k
+       (lambda (embed/url)
+         `(div (h3 ,(number->string (web-cell-ref a-counter)))
+               (a ([href
+                    ,(embed/url
+                      (lambda _ 
+                        (define last (web-cell-ref a-counter)) 
+                        (web-cell-shadow a-counter (add1 last)) 
+                        (loop)))])
+                  "+"))))))
+  servlet-prompt))
+
+2.5扩展管理器
+由于Racket servlet在服务器上存储它们的扩展，它们占用服务器上的内存。 此外，垃圾收集不能用于释放此内存，因为系统外有根：用户的浏览器，书签，大脑和笔记本。因此，如果要控制内存使用，必须使用一些其他策略。 此功能可通过管理器界面插入。
+
+2.5.1概述
+(require web-server/managers/manager)			package: web-server-lib
+此模块定义管理器接口。 它是管理者的用户和实现者所需要的。
+
+(struct	 	manager	 (	create-instance
+     	 	 	 	adjust-timeout!
+     	 	 	 	clear-continuations!
+     	 	 	 	continuation-store!
+     	 	 	 	continuation-lookup
+     	 	 	 	continuation-peek)
+
+    #:extra-constructor-name make-manager)
+  create-instance : ((-> void) . -> . number?)
+  adjust-timeout! : (number? number? . -> . void)
+  clear-continuations! : (number? . -> . void)
+  	continuation-store!	 	:	 	
+(number? any/c
+         (or/c false/c
+               (request? . -> . can-be-response?))
+         . -> . (list/c number? number?))
+  continuation-lookup : (number? number? number? . -> . any/c)
+  continuation-peek : (number? number? number? . -> . any/c)					结构
+create-instance被调用来初始化一个实例，以保持一个servlet会话的扩展。当实例过期时，它被传递一个函数来调用。它运行实例的id。
+adjust-timeout!是一个被弃用的函数，它接受一个instance-id和一个数字。它特定于基于超时的管理器，将被删除。
+clear-continuations!使实例的所有扩展到期。
+continuation-store!被赋予一个instance-id，一个扩展值，以及一个函数，如果扩展被查找并且已经过期，则抛出异常。返回的两个数字是continuation-id和nonce。
+continuation-lookup找到关联给定instance-id，continuation-id和nonce三元组的扩展值。
+continuation-peek与continuation-lookup相同，除了它的使用不能影响对实例或继续访问的资源管理策略决策。它旨在由调试器和基准测试程序使用。
+
+(struct	 	exn:fail:servlet-manager:no-instance exn:fail
+     	 	(expiration-handler)
+    #:extra-constructor-name
+    make-exn:fail:servlet-manager:no-instance)
+  	expiration-handler	 	:	 	
+(or/c false/c
+      (request? . -> . can-be-response?))												结构
+当查找不存在的实例时，管理器应抛出此异常。
+
+(struct	 	exn:fail:servlet-manager:no-continuation exn:fail
+     	 	(expiration-handler)
+    #:extra-constructor-name
+    make-exn:fail:servlet-manager:no-continuation)
+  	expiration-handler	 	:	 	
+(or/c false/c
+      (request? . -> . can-be-response?))												结构
+当查找不存在的延续时，管理器应抛出此异常。
+
+2.5.2无延续
+ (require web-server/managers/none)							package: web-server-lib
+此模块定义了一个管理器构造函数：
+
+(create-none-manager instance-expiration-handler) → manager?
+  	instance-expiration-handler	 	:	 	
+(or/c false/c
+      (request? . -> . can-be-response?))												程序
+此管理器实际上不存储任何连续或实例数据。 如果您知道您的servlet不使用扩展捕获功能，并希望服务器不为每个实例分配元数据结构，那么您可以使用它。
+如果您使用扩展捕获功能，这个扩展根本不会被存储。 如果URL被访问，则 instance-expiration-handler请求被呼叫。
+如果您正在考虑使用此管理器，还请考虑使用Web语言。 （请参阅无状态Servlet。）
+
+2.5.3超时
+ (require web-server/managers/timeouts)						package: web-server-lib
+这个模块定义了一个管理器构造函数：
+
+(create-timeout-manager	 	instance-exp-handler	 	 	 	 
+     	 	instance-timeout	 	 	 	 
+     	 	continuation-timeout)	 	→	 	manager?
+  	instance-exp-handler	 	:	 	
+(or/c false/c
+      (request? . -> . can-be-response?))
+  instance-timeout : number?
+  continuation-timeout : number?													程序
+此管理器管理的实例将在最后一次访问之后到期instance-timeout秒数。 如果查找过期的实例，则使用instance-exp-handler作为到期处理程序抛出exn:fail:servlet-manager:no-instance异常。
+此管理器管理的扩展将在最后一次访问过期continuation-timeout秒数。 如果查找到一个过期的扩展，如果没有expiration-handler被传递给 continuation-store!，exn:fail:servlet-manager:no-continuation异常被抛出与instance-exp-handler作为到期处理。adjust-timeout!对应的reset-timer!在定时器负责servlet实例。
+这个管理器被发现是...有问题的...在Web服务器的大规模部署时。
+
+2.5.4 LRU
+(require web-server/managers/lru)								package: web-server-lib
+这个模块定义了一个管理器构造函数：
+
+(create-LRU-manager	 	instance-expiration-handler	 	 	 	 
+     	 	check-interval	 	 	 	 
+     	 	collect-interval	 	 	 	 
+     	 	collect?	 	 	 	 
+     	 [	#:initial-count initial-count	 	 	 	 
+     	 	#:inform-p inform-p])	 	→	 	manager?
+
+  	instance-expiration-handler	 	:	 	
+(or/c false/c
+      (request? . -> . can-be-response?))
+  check-interval : integer?
+  collect-interval : integer?
+  collect? : (-> boolean?)
+  initial-count : integer? = 1
+  inform-p : (integer? . -> . void) = (lambda _ (void))								程序
+在实例解锁后，如果没有与其关联的延续，此管理器管理的实例将过期。如果查找过期的实例，则使用instance-exp-handler作为到期处理程序抛出 exn:fail:servlet-manager:no-instance异常。
+该管理器管理的扩展最初被赋予初始计数的“生命计数”。如果查找到一个过期的扩展，并且如果没有expiration-handler被传递给continuation-store!，exn:fail:servlet-manager:no-continuation被 instance-exp-handler作为过期管理器抛出。
+每个check-interval秒collect?被调用以确定是否应该运行收集例程。每个collect-interval秒运行收集例程。
+每次收集例程运行时，每个扩展的“生命计数”递减1。如果扩展的计数到达0，则它到期。如果任何扩展过期，则调用inform-p函数，其中扩展已过期。
+此管理器的建议用法可按以下函数编写：
+
+(make-threshold-LRU-manager	 	instance-expiration-handler	 
+     	 	memory-threshold)	 
+
+ → manager?
+  	instance-expiration-handler	 	:	 	
+(or/c false/c
+      (request? . -> . can-be-response?))
+  memory-threshold : number?														程序
+这将创建具有以下行为的LRU管理器：内存限制设置为memory-threshold字节。 扩展从24个生命点开始。 生命点以每10分钟一次的速率扣除，或者当超过记忆极限时每5秒扣除一次。 因此，扩展的最长寿命为4小时，最小寿命为2分钟。
+如果服务器上的负载峰值（如内存使用情况所示），则服务器将快速过期扩展，直到内存回到受控状态。 如果负载保持低，它仍将有效地过期旧的扩展。
