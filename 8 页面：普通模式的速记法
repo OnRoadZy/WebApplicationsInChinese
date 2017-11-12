@@ -1,0 +1,54 @@
+8 页面：普通模式的速记法
+
+(require web-server/page)												package: web-server-lib
+服务器提供了一个用于构建Web应用程序的简单实用程序库，其主要与send/suspend/dispatch-created的页面和请求处理相一致。
+大多数Web应用程序严重依赖于send/suspend/dispatch，并且通常使用模式为：
+(send/suspend/dispatch
+ (λ (my-embed/url)
+   .... (my-embed/url other-page) .…))
+
+ (page e …)																			语法
+页宏通过将 (page e ...)扩展为send/suspend/dispatch的用法来自动化，其中语法参数 embed/url绑定到send/suspend/dispatch的参数。
+
+embed/url																			语法
+当在页面语法内部使用时，用于过程嵌入函数的重命名变换器; 否则，语法错误。
+一个简单的示例：
+(page
+ (response/xexpr
+  `(html
+    (body
+     (a ([href
+          ,(embed/url
+            (λ (req)
+              "You clicked!"))])
+        "Click me")))))
+同样，许多Web应用程序几乎只使用作为 embed/url的参数的函数，并立即调用 send/suspend/dispatch。
+
+(lambda/page formals e …)															语法
+(define/page (id . formals) e …)														语法
+ lambda/page和define/page通过扩展接受一个请求作为第一个参数（后面是formals中指定的任何参数）的函数来自动化，并立即在页面中包装他们的主体。此函数还通过将请求绑定到current-request参数来配合get绑定。
+ web-server/http的绑定接口是强大的，但微妙到使用方便，由于其保护敌对客户端。
+
+(current-request) → request?															参数
+(current-request req) → void?
+  req : request?
+
+binding-id/c : contract?																值
+binding-format/c : contract?															值
+
+(get-binding id [req #:format format])													程序
+ → (or/c false/c string? bytes? binding?)
+  id : binding-id/c
+  req : request? = (current-request)
+  format : binding-format/c = 'string
+
+(get-bindings id [req #:format format])													程序
+ → (listof (or/c string? bytes? binding?))
+  id : binding-id/c
+  req : request? = (current-request)
+  format : binding-format/c = 'string
+get-binding(s) 接口尝试通过提供具有方便的默认值的强大的接口来解决这个问题。
+get-binding从请求中提取表单输入的第一个绑定，而get-bindings提取它们。
+它们接受表单标识符 (id)作为字节字符串，字符串或符号。 在每种情况下，以区分大小写的方式将用户输入与表单输入进行比较。
+它们接受可选的请求参数 (req) ，该参数默认为 lambda/page和define/page使用的current-request参数的值。
+最后，他们接受一个可选的关键字参数 (format) ，指定所需的返回格式。 默认的'string'产生一个UTF-8字符串（或者#f，如果字节字符串不能转换为UTF-8。） 'bytes格式总是产生原始字节字符串。  'file格式生成文件上传内容（如果表单输入不是上传的文件，则为#f）。 'binding格式生成绑定对象。
