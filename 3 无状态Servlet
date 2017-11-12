@@ -1,0 +1,377 @@
+3无状态Servlet
+
+#lang web-server/base	 package: web-server-doc
+ #lang web-server
+无状态servlet应提供以下导出：
+
+interface-version : (one-of/c 'stateless)												值
+这表示servlet是无状态servlet。
+
+stuffer : (stuffer/c serializable? Bytes?)											值
+这是将用于servlet的填充程序。
+如果没有提供，它默认为default-stuffer。
+
+manager : manager?																值
+这是将用于servlet的管理器。
+如果没有提供，它默认为（create-none-manager #f）。
+
+(start initial-request) → response?
+  initial-request : request?															程序
+当此servlet的实例启动时调用此函数。 参数是启动实例的HTTP请求。
+一个示例“无状态servlet模块：
+#lang web-server
+(require web-server/http)
+(provide interface-version stuffer start)
+(define interface-version 'stateless)
+(define stuffer
+  (stuffer-chain
+   serialize-stuffer
+   (md5-stuffer (build-path (find-system-path 'home-dir) ".urls"))))
+(define (start req)
+  (response/xexpr
+   `(html (body (h2 "Look ma, no state!")))))
+ web-server/base语言从racket/base导出所有的函数和语法，没有别的。
+ web-server语言导出以下库中的所有函数和语法： racket, net/url, web-server/http, web-server/http/bindings, web-server/lang/abort-resume, web-server/lang/web, web-server/lang/native, web-server/lang/web-param, web-server/lang/web-cells, web-server/lang/file-box, web-server/lang/soft, web-server/dispatch和web-server/stuffers。 其中一些记录在随后的子节中。
+
+3.2使用注意事项
+无状态servlet自动执行以下进程：
+    • letrec的所有用法都被删除，并用let和命令式特征的等效用法代替。
+    • 程序被转换为ANF（管理正常表单），使所有连续显式。
+    •     所有连续和连续标记都记录在它们的延续的表达式的连续标记中。
+    •     所有对外部模块的调用都被标识和标记。
+    •     call/cc的所有用法被删除，并通过早先安装的连续标记的等效聚集来替换。
+    •     该程序用每个λ的可串行化数据结构去功能化。
+此过程允许您的servlet捕获的扩展序列化。这意味着它们可以存储在客户端的浏览器或服务器的磁盘上。
+这意味着您的servlet对服务器没有执行成本。这是非常有吸引力的，如果你使用Racket servlets并且有内存问题。
+这意味着您的服务器可以在长时间运行的Web交互过程中重新启动，而不会与客户端共享的URL过期。这是非常有吸引力的，如果你使用Racket servlets并且有会话超时问题。
+这个过程是定义在所有的Racket和发生宏扩展后，所以你可以自由使用所有有趣的功能的Racket。但是，有一些必须考虑的事情。
+首先，这个过程会大大改变程序的结构。它将创建大量的lambda和结构，你的程序通常不包含。这个的性能暗示没有在Racket中研究。
+第二，反函数化过程对你的程序的句法结构很敏感。因此，如果你以一个简单的方式改变你的程序，例如，改变一个常量，那么所有的序列化的扩展将被废弃，并且在尝试反序列化时将会出错。这是一个功能，而不是错误！如果你的程序以有意义的方式改变，这是一个小的价格，以保护免受各种错误。如果使用default-stuffer或 web-server/stuffers/hash，那么只要更改servlet的代码，就可以安全地删除所有保存的扩展，因为它们不再使用。
+第三，你的扩展的词义范围中的值必须是可序列化的，以使序列本身的序列化。这意味着你必须使用define-serializable-struct而不是define-struct，并且注意使用相同的模块。类似地，您不能使用parameterize，因为参数化不是可序列化的。
+第四，相关地，这个过程只运行你的代码，而不是你需要的代码。因此，你的扩展——可序列化——不能在另一个模块的上下文中。例如，以下将随出现“unsafe context”（不安全的上下文）异常而失败：
+(define requests
+  (map (lambda (rg) (send/suspend/url rg))
+       response-generators))
+因为map不会被过程转换。 但是，如果你定义了自己的map函数，就没有问题。 另一个解决方案是使用serial-> native和native-> serial将连续的映射部分存储在服务器上：
+(define requests
+  (serial->native
+   (map (lambda (rg) (native->serial (send/suspend/url rg)))
+       response-generators)))
+第五，存储没有被序列化。 如果你依靠存储，你会承担巨大的风险。 您将假定在重新启动服务器或内存被垃圾回收之前，在同一服务器上调用序列化扩展。
+这个过程来自于Pettyjohn等人在2005年的《Generalized Stack Inspection》（广义堆栈检查）论文的扩展论述 ，Jay McCarthy在2009年的《Automatically RESTful Web Applications》（自动RESTful Web应用程序）或《Marking Modular Serializable Continuations》（标记模块化可序列化扩展），以及Jay McCarthy在2010年的两次陈述解决方案：《Native and Serializable Continuations Accord》（本地机和可序列化扩展协议），我们感谢Greg Pettyjohn他最初实现这个算法。
+
+3.3可串行扩展
+(require web-server/lang/abort-resume)						package: web-server-lib
+无状态语言的主要目的是为您的servlet提供可序列化的扩展。
+
+    (call-with-serializable-current-continuation response-generator)
+ → any
+  response-generator : (continuation? . -> . any)									程序
+以可序列化的方式捕获当前的扩展，并使用它调用 response-generator，返回结果。
+如果使用serial->native和native->serial来捕获不可变形的上下文，这可能使用当前servlet的管理器的资源。
+
+(serial->native expr)																表达式
+serial->native通知序列化运行时，expr可能是对未转换的上下文的调用。 这设置了native- serial到signal-with-serializable-current-continuation的必要信息，以捕获上下文的本机（因此不可串行化）部分并将其存储在服务器上。
+
+(native->serial expr)																表达式
+native->serial通知序列化运行时expr标记从未转换的上下文返回后的第一个表达式。这捕获未转换的上下文，使得call-with-serializable-current-continuation可以将其存储在服务器上并且从可串行化的扩展引用它。例如，
+(build-list
+ 3
+ (lambda (i)
+   (call-with-serializable-current-continuation
+    (lambda (k) (serialize k)))))
+将在运行时失败，因为构建列表不会被转换。 然而，
+(serial->native
+ (build-list
+  3
+  (lambda (i)
+    (native->serial
+     (call-with-serializable-current-continuation
+      (lambda (k) (serialize k)))))))
+将成功，并且k将引用当前servlet的管理器中的单元格，其存储构建列表中的扩展的部分。
+
+3.4本机接口
+(require web-server/lang/native)								package: web-server-lib
+在整个程序中使用serial->native和native->serial有时不方便。 此模块提供了一个用于创建包装器的宏。
+
+(define-native (native arg-spec ...) original)
+      	arg-spec	 	:	 	ho
+      	arg-spec	 	:	 	_														表达式
+围绕原始命名的本机构建一个接口，使得对native的调用被包装在serial-> native中，并且在arg-spec中标记为ho的所有参数都被假定为过程，并且被包装在native-> serial中。
+    (define-native (build-list/native _ ho) build-list)
+相当于
+(define (build-list/native fst snd)
+  (serial->native
+   (build-list
+    fst
+    (lambda args
+      (native->serial
+       (apply snd args))))))
+
+3.5无状态Web交互
+(require web-server/lang/web)									package: web-server-lib
+
+(send/suspend/url response-generator) → request?
+  response-generator : (url? . -> . response?)										程序
+捕获当前扩展。 将其序列化并将其填充到URL中。 使用此URL调用响应生成器并将响应传递到客户端。 如果URL被调用，则请求返回到这个扩展。
+
+(send/suspend response-generator) → request?
+  response-generator : (string? . -> . response?)									程序
+像send/suspend/url，但是使用字符串URL表示。
+
+(send/suspend/hidden response-generator) → request?
+  response-generator : (url? xexpr/c . -> . response?)								程序
+捕获当前扩展。 将其序列化并将其填充到隐藏的INPUT表单元素中。 使用此URL和表单字段调用响应生成器，并将响应传递到客户端。 如果使用包含隐藏表单的表单数据调用URL，则会将请求返回到此扩展。
+
+(send/suspend/url/dispatch make-response) → any
+  make-response : (((request? . -> . any) . -> . url?) . -> . response?)				程序
+使用一个函数调用make-response，当使用 request?的过程调用时，any/c会生成一个URL，当调用时将调用该函数的request?对象并将结果返回给send/suspend/dispatch的调用者。
+
+(send/suspend/dispatch make-response) → any
+  make-response : (((request? . -> . any) . -> . string?) . -> . response?)			程序
+像send/suspend/url/dispatch但是用字符串URL表示。
+
+(redirect/get) → request?															程序
+请参见web-server/servlet/web。
+
+3.6无状态Web单元格
+(require web-server/lang/web-cells)							package: web-server-lib
+web-server/lang/web-cells库提供与web-server/servlet/web-cells相同的API，但方式与Web Language兼容。 一个区别是make-web-cell是语法，而不是一个函数。
+
+(web-cell? v) → boolean?
+  v : any/c																			程序
+ (make-web-cell default-expr)														表达式
+(web-cell-ref wc) → any/c	
+  wc : web-cell?																	程序
+(web-cell-shadow wc v) → void
+  wc : web-cell?
+  v : any/c																			程序
+请参阅web-server/servlet/web-cells。
+
+3.7文件盒
+(require web-server/lang/file-box)								package: web-server-lib
+如前所述，由于其可用的部署方案，依赖Web语言servlet中的存储是危险的。 此模块提供了一个简单的API来以安全的方式替换盒子。
+
+(file-box? v) → boolean?
+  v : any/c																			程序
+检查v是否是文件盒。
+
+(file-box p v) → file-box?
+  p : path-string?
+  v : serializable?																	程序
+创建存储在p的文件盒，默认内容为v。
+
+(file-unbox fb) → serializable?
+  fb : file-box?																		程序
+返回fb内的值。
+
+(file-box-set? fb) → boolean?
+  fb : file-box?																		程序
+返回#t如果fb包含值。
+
+(file-box-set! fb v) → void
+  fb : file-box?
+  v : serializable?																	程序
+在由fb表示的文件中保存v。
+警告：如果计划使用负载均衡器，请确保文件盒位于共享介质上。
+
+3.8无状态Web参数
+(require web-server/lang/web-param)							package: web-server-lib
+在Web语言中使用parameterize不容易。 此模块以可串行化的方式提供（大致）相同的功能。 像其他可序列化的东西在Web语言上一样，对源代码修改敏感。
+
+(make-web-parameter default)													表达式
+扩展为Web参数的定义，默认为默认值。 Web参数是一个过程，当使用零参数调用时，返回默认值或在调用的动态上下文中web参数化的最后一个值。
+
+(web-parameter? v) → boolean?
+  v : any/c																			程序
+检查v是否显示为Web参数。
+
+(web-parameterize ([web-parameter-expr value-expr] ...) expr ...)				表达式
+运行（begin expr ...），以便web-parameter-exprs评估的web参数绑定到值-exprs。 从价值expr的角度来看，这就像let。
+
+3.9软状态
+(require web-server/lang/soft)									package: web-server-lib
+有时，您希望从无状态程序引用大型数据结构，而不需要序列化数据结构，并增加序列化的大小。 此模块为此方案提供支持。
+
+(soft-state? v) → boolean?
+  v : any/c																			程序
+确定v是否为软状态记录。
+
+(make-soft-state thnk) → soft-state?
+  thnk : (-> any/c)																	程序
+创建一个通过thnk计算的软状态。 此值是可序列化的。
+
+(soft-state-ref ss) → any/c
+  ss : soft-state?																		程序
+提取与ss相关联的值。 如果值不可用（可能是由于垃圾回收，未初始化进程中的反序列化等），则调用与ss相关联的thunk并缓存该值。
+
+(soft-state expr …)																表达式
+相当于 (make-soft-state (lambda () expr ...))。
+这里是一个使用软状态的servlet示例：
+#lang web-server
+ 
+(provide interface-version start)
+(define interface-version 'stateless)
+ 
+(define softie
+  (soft-state
+   (printf "Doing a long computation...\n")
+   (sleep 1)))
+ 
+(define (start req)
+  (soft-state-ref softie)
+  (printf "Done\n")
+  (start
+   (send/suspend
+    (lambda (k-url)
+      (response/xexpr
+       `(html (body (a ([href ,k-url]) "Done"))))))))
+当这个运行和链接被点击几次，输出是：
+$ plt-web-server -p 8080
+Doing a long computation...
+Done
+Done
+Done
+Done
+如果服务器重新启动或URL中的主机名更改为具有相同代码的其他主机，并单击该URL：
+^Cuser break
+$ plt-web-server -p 8080
+Doing a long computation...
+Done
+
+3.10填充
+(require web-server/stuffers)									package: web-server-lib
+Web服务器语言提供可序列化的扩展。 序列化功能被抽象为控制其操作方式的填充程序。 在编写无状态servlet时，您可以提供自己的（使用这些函数构建）。
+
+3.10.1基本组合器
+(require web-server/stuffers/stuffer)							package: web-server-lib
+
+(struct	 	stuffer (in out)
+    #:extra-constructor-name make-stuffer)
+  in : (any/c . -> . any/c)
+  out : (any/c . -> . any/c)															结构
+填充者本质上是在该结构中捕获的可逆函数。 以下内容应该被捕获：
+(out (in x)) = x
+(in (out x)) = x
+
+(stuffer/c dom rng) → contract?
+  dom : any/c
+  rng : any/c																		程序
+构建一个合同的合同（-> domrng）和out有合同（-> rng dom）。
+
+id-stuffer : (stuffer/c any/c any/c)													值
+身份填充。
+
+(stuffer-compose g f) → (stuffer/c any/c any/c)
+  g : (stuffer/c any/c any/c)
+  f : (stuffer/c any/c any/c)															程序
+组合f和g，即，应用f然后对于in使用g，然后对g应用g。
+
+(stuffer-sequence f g) → (stuffer/c any/c any/c)
+  f : (stuffer/c any/c any/c)
+  g : (stuffer/c any/c any/c)															程序
+stuffer-compose参数交换。
+
+(stuffer-if c f) → (stuffer/c bytes? bytes?)
+  c : (bytes? . -> . boolean?)
+  f : (stuffer/c bytes? Bytes?)														程序
+创建一个填充f的填充，如果c在输入到的in是真的。同样，如果在in期间应用f（其中通过添加一个字节记录）。
+
+(stuffer-chain x ...) → stuffer?
+  x : (or/c stuffer? (bytes? . -> . boolean?))											程序
+将填充序列和填充因子应用于x的连续尾部。
+
+3.10.2序列化
+(require web-server/stuffers/serialize)							package: web-server-lib
+
+serialize-stuffer : (stuffer/c serializable? bytes?)									值
+使用序列化和write/bytes并反序列化和read/bytes的填充程序。
+
+3.10.3 Base64编码
+(require web-server/stuffers/base64)							package: web-server-lib
+
+base64-stuffer : (stuffer/c bytes? bytes?)											值
+使用base64编码和base64解码的填充程序。
+用于获取URL安全字节。
+
+3.10.4 GZip压缩
+(require web-server/stuffers/gzip)								package: web-server-lib
+
+gzip-stuffer : (stuffer/c bytes? bytes?)												值
+使用gzip/bytes和gunzip/bytes的填充程序。
+警告：您应该使用base64-stuffer来获取URL安全字节。
+
+3.10.5键/值存储
+(require web-server/stuffers/store)								package: web-server-lib
+web-server/stuffers/hash填充程序依赖于键/值存储。
+
+(struct	 	store (write read)
+    #:extra-constructor-name make-store)
+  write : (bytes? bytes? . -> . void)
+  read : (bytes? . -> . bytes?)														结构
+以下内容应该保持：
+    (begin (write k v) (read k)) = v
+
+(dir-store root) → store?
+  root : path-string?																	程序
+一个将键值存储在文件的存储位于
+(build-path
+ root
+ (bytes->string/utf-8 key))
+应该很容易使用此接口为数据库创建存储，如SQLite，CouchDB或BerkeleyDB。
+
+3.10.6散列寻址存储
+(require web-server/stuffers/hash)								package: web-server-lib
+
+hash-fun/c : contract?																值
+等效于(-> bytes? bytes?)。
+
+(hash-stuffer H store) → (stuffer/c bytes? bytes?)
+  H : hash-fun/c
+  store : store?																		程序
+内容寻址存储填充器，存储输入字节，输入，与键（H输入）一起存储并返回键。 类似地，查找原始字节。
+
+(md5-stuffer root) → (stuffer/c bytes? bytes?)
+  root : path-string?																	程序
+相当于(hash-stuffer md5 (dir-store root))。
+
+3.10.7 HMAC-SHA1签名
+(require web-server/stuffers/hmac-sha1)						package: web-server-lib
+
+(HMAC-SHA1 kb db) → bytes?
+  kb : bytes?
+  db : bytes?																		程序
+使用kb作为键对db执行HMAC-SHA1计算。 结果保证为20字节。 （你可以curry这个使用它与散列填充，但这样做在md5没有什么价值。）
+
+(HMAC-SHA1-stuffer kb) → (stuffer/c bytes? bytes?)
+  kb : bytes?																		程序
+使用HMAC-SHA1以kb作为键来签署输入的填充符。 填充的结果是输入数据前面的散列。 当填充器反向运行时，它检查前20个字节是否对其余数据是正确的。
+警告：您应该使用base64-stuffer来获取URL安全字节。
+警告：没有明确规定，用户可以修改通过其他填充程序发送的延续。 这个填充程序允许servlet证明填充数据是由servlet真正生成的。 因此，如果你不使用哈希填充，你应该使用这个。
+警告：此填充程序不会加密数据，因此用户仍然可以观察填充值。
+
+3.10.8助手
+(require web-server/lang/stuff-url)								package: web-server-lib
+
+(is-url-too-big? v) → boolean?
+  v : bytes?																			程序
+确定填充到当前servlet的URL中是否会导致对于Internet Explorer而言过大的URL。 （IE仅支持长达2048个字符的网址。）
+
+(make-default-stuffer root) → (stuffer/c serializable? bytes?)
+  root : path-string?																	程序
+构造一个序列化的填充程序，然后如果URL太大，压缩（和base64编码），如果URL仍然太大，那么它将它存储在以根为根的MD5索引的数据库中。
+(stuffer-chain
+ serialize-stuffer
+ is-url-too-big?
+ (stuffer-chain
+  gzip-stuffer
+  base64-stuffer)
+ is-url-too-big?
+ (md5-stuffer root))
+
+default-stuffer : (stuffer/c serializable? bytes?)										值
+相当于：
+(make-default-stuffer
+ (build-path
+  (find-system-path 'home-dir)
+  ".urls"))
