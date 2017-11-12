@@ -1,0 +1,349 @@
+7 模板：分离视图
+
+(require web-server/templates)										package: web-server-lib
+Web服务器提供了强大的Web模板系统，用于分离Web应用程序的表示逻辑，并使非程序员能够贡献给基于Racket的Web应用程序。
+
+7.1静态
+假设我们有一个文件“static.html”的内容：
+<html>
+   <head><title>Fastest Templates in the West!</title></head>
+   <body>
+    <h1>Bang!</h1>
+    <h2>Bang!</h2>
+   </body>
+  </html>
+如果我们在代码中写下面的代码：
+(include-template "static.html")
+然后，“static.html”的内容将在编译时读取，并编译为一个racket程序，将“static.html”的内容作为字符串返回：
+    "<html>\n  <head><title>Fastest Templates in the West!</title></head>\n  <body>\n    <h1>Bang!</h1>\n    <h2>Bang!</h2>\n  </body>\n</html>"
+
+7.2动态
+include-template让模板访问包含程序的完整词法上下文。 可以通过@Syntax语法访问此上下文。 例如，如果“simple.html”包含：
+<html>
+   <head><title>Fastest @thing in the West!</title></head>
+   <body>
+    <h1>Bang!</h1>
+    <h2>Bang!</h2>
+   </body>
+  </html>
+那么
+(let ([thing "Templates"])
+  (include-template "simple.html"))
+评估为与静态示例相同的内容。
+对于如何填充模板的词汇上下文没有约束。 例如，您可以通过将模板包含在函数中来构建模板抽象：
+(define (fast-template thing)
+  (include-template "simple.html"))
+(fast-template "Templates")
+(fast-template "Noodles")
+评估为具有可预测内容的两个字符串：
+ <html>
+   <head><title>Fastest Templates in the West!</title></head>
+   <body>
+    <h1>Bang!</h1>
+    <h2>Bang!</h2>
+   </body>
+  </html>
+和
+<html>
+   <head><title>Fastest Noodles in the West!</title></head>
+   <body>
+    <h1>Bang!</h1>
+    <h2>Bang!</h2>
+   </body>
+  </html>
+此外，对模板使用的Racket没有约束：它们可以使用宏，结构，连续标记，线程等。然而，最终返回的Racket值必须能够由文本生成器打印。 例如，考虑对fast-template的不同调用的标题行的以下输出：
+    • (fast-template 'Templates)
+  ...<title>Fastest Templates in the West!</title>…
+    • (fast-template 42)
+...<title>Fastest 42 in the West!</title>…
+    • (fast-template (list "Noo" "dles"))
+  ...<title>Fastest Noodles in the West!</title>...
+    • (fast-template (lambda () "Thunks"))
+  ...<title>Fastest Thunks in the West!</title>...
+    • (fast-template (delay "Laziness"))
+  ...<title>Fastest Laziness in the West!</title>...
+    • (fast-template (fast-template "Embedding"))
+  ...<title>Fastest ...<title>Fastest Embedding in the West!</title>... in the West!</title>…
+
+7.3 Gotchas
+要在模板输出中获得@character，必须对其进行转义，因为它是@Syntax语法的转义字符。 例如，要获得：
+ <head><title>Fastest @s in the West!</title></head>
+您必须写：
+<head><title>Fastest @"@"s in the West!</title></head>
+作为您的模板：literal @s必须替换为@“@”。 （请注意，双引号基本上是一个Racket表达式，可以用于更长的字符串。）
+@Syntax将读取Racket标识符，因此它不会界定标识符或XML尖括号上的标识符。 所以，
+  <head><title>Fastest @thing in the @place!</title></head>
+将抱怨标识符的 place!</title></head>未定义。 您可以通过明确定界标识符来改变这一点：
+<head><title>Fastest @thing in the @|place|!</title></head>
+另一个困扰是，因为模板被编译成一个Racket程序，只有它的结果将被打印。 例如，假设我们有模板：
+ <table>
+   @for[([c clients])]{
+    <tr><td>@(car c), @(cdr c)</td></tr>
+   }
+  </table>
+如果这包括在与客户绑定的词汇上下文中
+(list (cons "Young" "Brigham") (cons "Smith" "Joseph"))
+那么模板将打印为：
+ <table>
+  </table>
+因为for不返回body的值。 假设我们更改模板以用于for/list （将它们组合成一个列表）：
+<table>
+   @for/list[([c clients])]{
+    <tr><td>@(car c), @(cdr c)</td></tr>
+   }
+  </table>
+现在结果是：
+  <table>
+   </tr>
+   </tr>
+  </table>
+因为只有for/list的正文的最终表达式包括在结果中。 我们可以通过使用body中的列表来捕获所有的子表达式：
+<table>
+   @for/list[([c clients])]{
+    @list{
+     <tr><td>@(car c), @(cdr c)</td></tr>
+    }
+   }
+  </table>
+现在结果是：
+<table>
+   <tr><td>Young, Brigham</td></tr>
+   <tr><td>Smith, Joseph</td></tr>
+  </table>
+模板库提供了一个句法形式来处理这个问题为你调用in：
+<table>
+   @in[c clients]{
+    <tr><td>@(car c), @(cdr c)</td></tr>
+   }
+  </table>
+注意它也避免了第二行的标点符号的荒谬几率。
+
+7.4转义
+因为模板对许多事情（scripts，CSS，HTML等）很有用，所以Web服务器不会认为模板是用于类似XML的内容。 因此，当扩展模板时，默认情况下不会执行XML转义。 当心跨站点脚本漏洞！ 例如，假设servlet提供以下模板，其中some-variable是客户端提供的输入字符串：
+<html>
+   <head><title>Fastest Templates in the West!</title></head>
+   <body>
+    @some-variable
+   </body>
+  </html>
+如果servlet包含以下内容：
+(let ([some-variable (get-input-from-user)])
+ (include-template "static.htm"))
+没有什么可以防止攻击者输入<script type =“text / javascript”> ... </ script>，使模板扩展为：
+<html>
+   <head><title>Fastest Templates in the West!</title></head>
+   <body>
+    <script type="text/javascript">...</script>
+   </body>
+  </html>
+现在服务器将发送攻击者的代码给数百万的无辜用户。 为了避免在服务HTML时发生这种情况，请使用xml模块中的xexpr-> string函数。
+这可以在servlet中完成：
+(require xml)
+    (let ([some-variable (xexpr->string (get-input-from-user))])
+     (include-template "static.htm"))
+或者，使模板负责自己的转义：
+<html>
+   <head><title>Fastest Templates in the West!</title></head>
+   <body>
+    @(xexpr->string some-variable)
+   </body>
+  </html>
+改进版本渲染现为：
+<html>
+   <head><title>Fastest Templates in the West!</title></head>
+   <body>
+     &lt;script type=\"text/javascript\"&gt;...&lt;/script&gt;
+   </body>
+  </html>
+在编写模板时，始终记住要转义用户提供的输入。
+
+7.5 HTTP响应
+从模板生成HTTP响应的最快方法是使用response?结构：
+(response/full
+ 200 #"Okay"
+ (current-seconds) TEXT/HTML-MIME-TYPE
+ empty
+ (list (string->bytes/utf-8 (include-template "static.html"))))
+最后，如果要将模板的内容包含在较大的X表达式中：
+`(html ,(include-template "static.html"))
+将导致包含文字字符串（和实体转义）。 如果你真的想要模板被转义，那么创建一个cdata结构：
+`(html ,(make-cdata #f #f (include-template "static.html")))
+
+7.6 API详细信息
+(include-template path-spec)															语法
+(include-template #:command-char command-char path-spec)
+使用包含词法上下文中的@Syntax语法在path-spec中编译模板。 path-spec与include使用的格式相同。 使用command-char关键字自定义转义字符。
+例子：
+(include-template "static.html")
+(include-template #:command-char #\$ "dollar-static.html")
+
+(in x xs e …)																		语法
+扩展到
+(for/list ([x xs])
+  (begin/text e …))
+模板示例：
+(in c clients "<tr><td>" (car c) ", " (cdr c) "</td></tr>")
+Racket示例：
+ (in c clients "<tr><td>" (car c) ", " (cdr c) "</td></tr>")
+
+7.7转换示例
+Al Church一直保持与Racket的博客多年，并希望转换为web-server/templates。
+他使用的数据结构定义为：
+(define-struct post (title body))
+ (define posts
+  (list
+   (make-post
+    "(Y Y) Works: The Why of Y"
+    "Why is Y, that is the question.")
+   (make-post
+    "Church and the States"
+    "As you may know, I grew up in DC, not technically a state.")))
+实际上，Al Church对这些帖子进行了编码，但是出于解释的原因，我们将使用结构。
+他将他的代码划分为表示函数和逻辑函数。 我们先看演示功能。
+第一表示功能定义所有页面的公共布局。
+(define (template section body)
+  (response/xexpr
+   `(html
+     (head (title "Al's Church: " ,section))
+     (body
+      (h1 "Al's Church: " ,section)
+      (div ([id "main"])
+           ,@body)))))
+这里要注意的一个事情是关于body参数的反引号拼接。 这表示正文是X表达式列表。 如果他不小心只使用了反引号，那么在将返回值转换为HTTP响应时会出错。
+(define (blog-posted title body k-url)
+  `((h2 ,title)
+    (p ,body)
+    (h1 (a ([href ,k-url]) "Continue"))))
+下面是一个简单主体的示例，它使用一个X表达式列表来显示新发布的博客条目，然后再继续重新显示主页面。 让我们来看一个更复杂的body：
+(define (blog-posts k-url)
+  (append
+   (apply append
+          (for/list ([p posts])
+            `((h2 ,(post-title p))
+              (p ,(post-body p)))))
+   `((h1 "New Post")
+     (form ([action ,k-url])
+           (input ([name "title"]))
+           (input ([name "body"]))
+           (input ([type "submit"]))))))
+此函数显示X表达式所需的许多通用模式。 首先，append用于组合不同的X表达式列表。 第二，apply append用于折叠和合并一个for/list的结果，其中每个迭代导致一个X表达式列表。 我们将看到模板不需要这些模式。 另一个恼人的模式显示，当Al尝试添加CSS样式和一些JavaScript从Google Analytics（分析）到他的博客的所有页面。 他将模板函数更改为：
+(define (template section body)
+  (response/xexpr
+   `(html
+     (head
+      (title "Al's Church: " ,section)
+      (style ([type "text/css"])
+             "body {margin: 0px; padding: 10px;}"
+             "#main {background: #dddddd;}"))
+     (body
+      (script
+       ([type "text/javascript"])
+       ,(make-cdata
+         #f #f
+         "var gaJsHost = ((\"https:\" =="
+         "document.location.protocol)"
+         "? \"https://ssl.\" : \"http://www.\");"
+         "document.write(unescape(\"%3Cscript src='\" + gaJsHost"
+         "+ \"google-analytics.com/ga.js' "
+         "type='text/javascript'%3E%3C/script%3E\"));"))
+      (script
+       ([type "text/javascript"])
+       ,(make-cdata
+         #f #f
+         "var pageTracker = _gat._getTracker(\"UA-YYYYYYY-Y\");"
+         "pageTracker._trackPageview();"))
+      (h1 "Al's Church: " ,section)
+      (div ([id "main"])
+           ,@body)))))
+我们注意到的第一件事是将CSS编码为字符串是相当原始的。 使用字符串编码JavaScript更糟糕的原因有两个：首先，我们更可能需要手动转义字符，例如“;其次，我们需要使用CDATA对象，因为大多数JavaScript代码使用需要转义的字符 在XML中，例如＆，但大多数浏览器将失败，如果这些字符是实体编码，这些都是模板不见了的问题。
+在移动到模板之前，让我们来看看逻辑功能：
+(define (extract-post req)
+  (define binds
+    (request-bindings req))
+  (define title
+    (extract-binding/single 'title binds))
+  (define body
+    (extract-binding/single 'body binds))
+  (set! posts
+        (list* (make-post title body)
+               posts))
+  (send/suspend
+   (lambda (k-url)
+     (template "Posted" (blog-posted title body k-url))))
+  (display-posts))
+ 
+(define (display-posts)
+  (extract-post
+   (send/suspend
+    (lambda (k-url)
+      (template "Posts" (blog-posts k-url))))))
+ 
+(define (start req)
+  (display-posts))
+要使用模板，我们只需要更改template，blog-posted和blog-posts：
+(define (template section body)
+  (response/full
+   200 #"Okay"
+   (current-seconds) TEXT/HTML-MIME-TYPE
+   empty
+   (list (string->bytes/utf-8 (include-template "blog.html")))))
+ 
+(define (blog-posted title body k-url)
+  (include-template "blog-posted.html"))
+ 
+(define (blog-posts k-url)
+  (include-template "blog-posts.html"))
+每个模板如下：
+"blog.html":
+  <html>
+   <head>
+    <title>Al's Church: @|section|</title>
+    <style type="text/css">
+     body {
+      margin: 0px;
+      padding: 10px;
+     } 
+
+     #main {
+      background: #dddddd;
+     }
+    </style>
+   </head>
+   <body>
+    <script type="text/javascript">
+     var gaJsHost = (("https:" == document.location.protocol) ?
+       "https://ssl." : "http://www.");
+     document.write(unescape("%3Cscript src='" + gaJsHost +
+       "google-analytics.com/ga.js'
+        type='text/javascript'%3E%3C/script%3E"));
+    </script>
+    <script type="text/javascript">
+     var pageTracker = _gat._getTracker("UA-YYYYYYY-Y");
+     pageTracker._trackPageview();
+    </script> 
+
+    <h1>Al's Church: @|section|</h1>
+    <div id="main">
+      @body
+    </div>
+   </body>
+  </html>
+请注意，演示文稿的这一部分要简单得多，因为CSS和JavaScript可以逐字包含，而不必使用任何特殊的转义转义模式。 类似地，由于主体被表示为字符串，因此不需要记住是否需要拼接。
+"blog-posted.html":
+  <h2>@|title|</h2>
+  <p>@|body|</p> 
+
+  <h1><a href="@|k-url|">Continue</a></h1>
+"blog-posts.html":
+  @in[p posts]{
+   <h2>@(post-title p)</h2>
+   <p>@(post-body p)</p>
+  }
+
+  <h1>New Post</h1>
+  <form action="@|k-url|">
+   <input name="title" />
+   <input name="body" />
+   <input type="submit" />
+  </form>
+比较这个模板和原始的演示功能：没有必要担心管理列表如何嵌套：默认值只是工作。
