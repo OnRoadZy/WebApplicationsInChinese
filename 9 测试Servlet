@@ -1,0 +1,65 @@
+9 测试Servlet
+
+（require web-server / test）package：web-server-lib
+Web服务器提供了一个简单的工具，用于为Web servlet和调度程序编写测试。
+核心功能允许将请求发送到servlet，并捕获响应：
+
+tester/c : contract?																		值
+这个合同相当于
+(->* ()
+       ((or/c string? url? request? false/c)
+        (listof binding?)
+        #:raw? boolean?
+        #:headers? boolean?)
+       (or/c bytes?
+             xexpr?
+             (cons/c bytes?
+                     (or/c bytes?
+                           Xexpr?))))
+它代表一个接受请求并返回该请求的servlet的函数。 这种交互功能具有许多可能的调用模式： 
+没有参数：调用没有绑定的根URL路径。
+ 至少一个参数：这可以是字符串，URL或请求数据结构。
+两个参数：第一个参数必须是字符串或URL，但第二个参数可以指定请求绑定。
+可选＃:raw? 关键字控制是否返回X表达式或字节字符串作为结果。
+可选的＃:headers? 关键字控制头是否作为字节字符串包含在返回值中。 当使用时，两个返回值返回一个缺点。
+
+(make-servlet-tester servlet) → tester/c													程序
+
+  	servlet:	
+(-> request?
+    Can-be-response?)
+该函数接受servlet函数并提供如上所述的测试器功能。 它相当于 (make-dispatcher-tester (dispatch/servlet servlet))，所以如果你需要自定义的dispatch/servlet参数，使用make-dispatcher-tester。
+
+(make-dispatcher-tester d) → tester/c													程序
+  d : dispatcher/c
+该功能接受调度器并提供如上所述的测试器功能。
+该设施被设计为与提取继续URL和相关值的技术一起使用；xml/path是一种来做到这一点的方法。 下面是一个测试Add-Two-Numbers.com的扩展示例：
+(define (test-add-two-numbers -s>)
+  (define x (random 500))
+  (define xs (string->bytes/utf-8 (number->string x)))
+  (define y (random 500))
+  (define ys (string->bytes/utf-8 (number->string y)))
+ 
+  (define r0 (-s>))
+  (define k0 (se-path* '(form #:action) r0))
+  (define i0 (se-path* '(form input #:name) r0))
+  (define r1
+    (-s> (format "~a?~a=~a" k0 i0 xs)
+         (list (make-binding:form (string->bytes/utf-8 i0) xs))))
+  (define k1 (se-path* '(form #:action) r1))
+  (define i1 (se-path* '(form input #:name) r1))
+  (define r2
+    (-s> (format "~a?~a=~a" k1 i1 ys)
+         (list (make-binding:form (string->bytes/utf-8 i1) ys))))
+  (define n (se-path* '(p) r2))
+  (check-equal? n
+                (format "The answer is ~a" (+ x y))))
+ 
+(require
+ (prefix-in ex:add1: web-server/default-web-root/htdocs/servlets/examples/add)
+ (prefix-in ex:add2: web-server/default-web-root/htdocs/servlets/examples/add-v2))
+ 
+(test-add-two-numbers
+ (make-servlet-tester ex:add1:start))
+(test-add-two-numbers
+ (make-servlet-tester ex:add2:start))
