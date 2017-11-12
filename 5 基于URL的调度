@@ -1,0 +1,168 @@
+5 基于URL的调度
+
+(require web-server/dispatch)									package: web-server-lib
+该库允许在永久URL和请求处理过程之间创建双向映射。
+
+5.1使用web-server/dispatch
+假设你正在编写一个博客应用程序，并想对网站的不同视图进行URL美化。您将如下定义一些URL调度规则：
+> (define-values (blog-dispatch blog-url)
+    (dispatch-rules
+     [("") list-posts]
+     [("posts" (string-arg)) review-post]
+     [("archive" (integer-arg) (integer-arg)) review-archive]
+     [else list-posts]))
+并定义您的请求处理程序如下：
+> (define (list-posts req) `(list-posts))
+> (define (review-post req p) `(review-post ,p))
+> (define (review-archive req y m) `(review-archive ,y ,m))
+现在，当请求发送到您的应用程序时，它将被定向到相应的处理程序：
+> (define (url->request u)
+    (make-request #"GET" (string->url u) empty
+                  (delay empty) #f "1.2.3.4" 80 "4.3.2.1"))
+> (blog-dispatch
+   (url->request "http://www.chrlsnchrg.com"))
+'(list-posts)
+> (blog-dispatch
+   (url->request "http://www.chrlsnchrg.com/"))
+'(list-posts)
+> (blog-dispatch
+   (url->request
+    "http://www.chrlsnchrg.com/posts/Extracurricular-Activity"))
+'(review-post "Extracurricular-Activity")
+> (blog-dispatch
+   (url->request "http://www.chrlsnchrg.com/archive/1984/10"))
+'(review-archive 1984 10)
+> (blog-dispatch
+   (url->request "http://www.chrlsnchrg.com/contact"))
+'(list-posts)
+您还可以从过程调用生成这些漂亮的URL：
+> (blog-url list-posts)
+"/"
+> (blog-url review-post "Another-Saturday-Night")
+"/posts/Another-Saturday-Night"
+> (blog-url review-archive 1984 11)
+"/archive/1984/11"
+掌握博客软件世界后，您会决定将无处不在的Add-Two-Numbers.com与Sum.com合作：
+> (define-values (sum-dispatch sum-url)
+    (dispatch-rules
+     [((integer-arg) ...) sum]
+     [else (lambda (req) (sum req empty))]))
+> (define (sum req is)
+    (apply + is))
+> (sum-dispatch (url->request "http://www.sum.com/"))
+0
+> (sum-dispatch (url->request "http://www.sum.com/2"))
+2
+> (sum-dispatch (url->request "http://www.sum.com/2/3/4"))
+9
+> (sum-dispatch (url->request "http://www.sum.com/5/10/15/20"))
+50
+> (sum-url sum empty)
+"/"
+> (sum-url sum (list 1))
+"/1"
+> (sum-url sum (list 2 3 5 7))
+"/2/3/5/7"
+当您使用带有serve/servlet的web-server/dispatch时，您几乎总是希望使用带有值“”的＃:servlet-regexp参数来捕获所有顶级请求。但是，如果您还要提供静态文件，请确保您的规则中不包含else，否则文件系统服务器将永远不会看到请求。
+
+5.2 API参考
+
+(dispatch-rules
+     dispatch-clause ...
+     maybe-else-clause)												表达式
+dispatch-clause	 	=	 	[dispatch-pattern maybe-method dispatch-fun]
+dispatch-pattern	 	=	 	()
+ 	 	|	 	(string . dispatch-pattern)
+ 	 	|	 	(bidi-match-expander ... . dispatch-pattern)
+ 	 	|	 	(bidi-match-expander . dispatch-pattern)
+maybe-method	 	=	 	
+ 	 	|	 	#:method method
+method	 	=	 	pat
+maybe-else-clause	 	=	 	
+ 	 	|	 	[else else-fun]
+      	else-fun	 	:	 	(request? . -> . any)
+      	dispatch-fun	 	:	 	(request? any/c ... . -> . any)
+返回两个值：第一个是具有契约（ - > request？any）的调度函数，它根据与请求的URL（和方法）匹配的第一个dispatch-pattern调用适当的dispatch-fun，第二个是URL- 生成函数与合同（ - >过程？任何/ C ...字符串？）生成一个URL使用dispatch-pattern作为其第一个参数的dispatch-fun。
+如果else-fun被省略，则提供调用（next-dispatcher）来通知Web服务器该调度器不应用。
+在匹配表达式中使用方法语法来匹配传入请求对象的请求方法部分。 然而，由于HTTP允许方法使用任何情况，请求方法的字节串被规范化为小写字符串。 因此，有效模式是诸如：“get”，“post”，“head”，（或“get”“post”）等。
+如果方法被省略，它假设应用于请求没有方法和GET方法。
+
+（dispatch-rules +applies
+ dispatch-clause ... 
+maybe-else-clause）														表达式
+与dispatch-rules一样，except如果分派规则适用于请求，则返回#t，否则返回合同（ - > request？boolean？）的第三个值。
+
+(dispatch-case
+ dispatch-clause ...
+ maybe-else-clause)														表达式
+返回dispatch-rules所描述的分派函数。
+
+(dispatch-url
+     [dispatch-pattern dispatch-fun]
+     ...)
+  	dispatch-fun	  : (request? any/c ... . -> . any)					表达式
+返回一个URL生成函数，如dispatch-rules所述。
+
+(serve/dispatch dispatch) → void
+  dispatch : (request? . -> . can-be-response?)							表达式
+使用＃:servlet-regex参数（#rx“”）调用serve/servlet，以便每个请求都由dispatch处理。
+
+5.3 命令性调度容器
+dispatch-rules是纯粹的功能。 这提供了一个更加声明性的接口，但禁止一些编程和模块化模式。 容器在调度规则上提供命令性覆盖。
+
+(container? x) → boolean?
+  x : any/c																程序
+标识容器。
+
+(define-container container-id (dispatch-id url-id))						表达式
+将container-id定义为容器，dispatch-id作为其分派函数，url-id作为其URL查找函数。
+
+(dispatch-rules! container-expr [dispatch-pattern dispatch-fun] …)		表达式
+与dispatch-rules一样，但是强制性地将模式添加到container-expr指定的容器。 在容器中已有的任何规则之前查阅新规则。
+
+5.4内置的URL模式
+web-server/dispatch在一些有用的URL组件模式中构建。
+
+(number-arg)																表达式
+一个双向匹配扩展器，从URL解析number?并生成一个以数字的编码作为字符串的URL。
+
+(integer-arg)																表达式
+一个双向匹配扩展器，从URL解析integer?并生成一个带有整数编码的URL作为字符串。
+
+(real-arg)																	表达式
+一个双向匹配扩展器，从URL解析real ?并生成一个带有实数编码的URL作为字符串。
+
+(string-arg)																	表达式
+一个双向匹配扩展器，从URL解析 string ?并生成包含字符串的URL。
+
+(symbol-arg)																表达式
+一个双向匹配扩展器，从URL解析 symbol ?并生成一个带有符号编码的URL作为字符串。
+
+5.5扩展web-server/dispatch
+(require web-server/dispatch/extend) 						package: web-server-lib
+你可以通过定义双向匹配扩展器来创建新的URL组件模式。
+
+(define-bidi-match-expander id in-xform out-xform)								表达式
+将id绑定到双向匹配扩展器，其中in-xform是在解析URL时使用的匹配扩展器（由define-match-expander定义），out-xform是生成URL时使用的扩展器。
+in-xform和out-xform都应该使用语法（xform arg ... id），其中args是特定于id的，并且与-xform和out-xform兼容。 id通常由调度规则自动提供。
+
+bidi-match-going-in?														表达式
+由双向匹配扩展器使用以确定是否正在解析或生成URL的语法参数。
+当定义新模式时，您可能会发现使用这些帮助函数很有用：
+
+(define-coercion-match-expander id test? coerce)							表达式
+将id绑定到展开（id x）到（？test？（app coerce x））的匹配展开器（即，使用test？来确定模式是否匹配并强制转换绑定。）
+
+ (make-coerce-safe? coerce) → (any/c . -> . boolean?)
+  coerce : (any/c . -> . any/c)												程序
+返回一个返回#t的函数，如果coerce不会抛出异常或在其输入上返回#f。
+例子：
+> (define string->number? (make-coerce-safe? string->number))
+> (string->number? "1")
+#t
+> (string->number? "1.2")
+#t
+> (string->number? "+inf.0")
+#t
+> (string->number? "one")
+#f
