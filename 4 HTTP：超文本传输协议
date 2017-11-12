@@ -1,0 +1,464 @@
+4 HTTP：超文本传输协议
+
+(require web-server/http)												package: web-server-lib
+Web服务器实现由此模块提供的许多HTTP库。
+
+4.1请求
+(require web-server/http/request-structs)						package: web-server-lib
+
+(struct	 	header (field value)
+    #:extra-constructor-name make-header)
+  field : bytes?
+  value : bytes?																		结构
+表示字段值的标题。
+
+(headers-assq id heads) → (or/c false/c header?)
+  id : bytes?
+  heads : (listof header?)															程序
+返回具有等于来自标题或#f的id的字段的标题。
+
+(headers-assq* id heads) → (or/c false/c header?)
+  id : bytes?
+  heads : (listof header?)															程序
+返回带有不区分大小等于head或#f的id的字段的头。
+你几乎总是想使用这个，而不是headers-assq，因为Web浏览器可能发送头任意封装。
+
+ (struct binding (id)
+    #:extra-constructor-name make-binding)
+  id : bytes?																			结构
+表示id的绑定。
+
+(struct binding:form binding (value)
+    #:extra-constructor-name make-binding:form)
+  value : bytes?																		结构
+表示将id绑定到值的表单。
+
+(struct binding:file binding (filename headers content)
+    #:extra-constructor-name make-binding:file)
+  filename : bytes?
+  headers : (listof header?)
+  content : bytes?																	结构
+表示上传具有id id和内容内容的文件filename，其中headers是来自文件所在的MIME包的附加头。（例如，某些浏览器可能包含＃“Content-Type”头。 ）
+
+(bindings-assq id binds) → (or/c false/c binding?)
+  id : bytes?
+  binds : (listof binding?)															程序
+从绑定或#f返回id等于id的绑定。
+
+(bindings-assq-all id binds) → (listof binding?)
+  id : bytes?
+  binds : (listof binding?)															程序
+像bindings-assq，但返回一个匹配id的所有绑定的列表。
+
+(struct request (method
+     	 	 	 	uri
+     	 	 	 	headers/raw
+     	 	 	 	bindings/raw-promise
+     	 	 	 	post-data/raw
+     	 	 	 	host-ip
+     	 	 	 	host-port
+     	 	 	 	client-ip)
+
+    #:extra-constructor-name make-request)
+  method : bytes?
+  uri : url?
+  headers/raw : (listof header?)
+  bindings/raw-promise : (promise/c (listof binding?))
+  post-data/raw : (or/c false/c bytes?)
+  host-ip : string?
+  host-port : number?
+  client-ip : string?																	结构
+在host-ip:host-port和header/raw头， bindings/raw GET和POST查询以及后post-data/raw POST数据之间，从客户端ip到服务器的uri的HTTP方法请求。
+你不太可能需要构造一个请求结构体。
+
+(request-bindings/raw r) → (listof binding?)
+  r : request?																		程序
+强制（request-bindings/raw-promise r）。
+这里是一个典型的例子，你会发现在许多应用程序：
+(define (get-number req)
+  (match
+    (bindings-assq
+      #"number"
+      (request-bindings/raw req))
+    [(? binding:form? b)
+     (string->number
+      (bytes->string/utf-8
+       (binding:form-value b)))]
+    [_
+     (get-number (request-number))]))
+
+4.2绑定
+(require web-server/http/bindings)								package: web-server-lib
+这些功能，虽然方便，可能会在您的应用程序中引入微妙的错误。 示例：他们不区分大小写可能会引入错误; 如果提交的数据不是UTF-8格式，那么转换为字符串将失败; 如果攻击者提交一个表单字段，如果它是一个文件，当它不是，那么请求绑定将持有一个字节？ 对象和你的程序会报错; 并且，对于文件上传，您将丢失文件名。 因此，我们建议不要使用它们，但提供它们是为了与旧代码兼容。
+
+(request-bindings req)
+ 	→(listof (or/c (cons/c symbol? string?)
+              (cons/c symbol? bytes?)))
+  req : request?
+通过解释bytes? 为string?翻译req的request-bindings/raw，除了在绑定的情况下：文件绑定，保持原样。 Id然后被转换为小写符号。
+
+(request-headers req) → (listof (cons/c symbol? string?))
+  req : request?																		程序
+通过解释bytes? 作为 string?翻译req的request-headers/raw。 Id然后被转换为小写符号。
+
+(extract-binding/single id binds) → string?
+  id : symbol?
+  binds : (listof (cons/c symbol? String?))											程序
+返回与a-list绑定中的id相关联的单个绑定（如果只有一个绑定）。 否则引发exn:fail。
+
+(extract-bindings id binds) → (listof string?)
+  id : symbol?
+  binds : (listof (cons/c symbol? String?))											程序
+返回a-list绑定中id的所有绑定的列表。
+
+(exists-binding? id binds) → boolean?
+  id : symbol?
+  binds : (listof (cons/c symbol? String))											程序
+返回#t如果绑定包含对id的绑定。 否则，#f。
+这里是一个典型的例子，你会发现在许多应用程序：
+(define (get-number req)
+  (string->number
+   (extract-binding/single
+    'number
+    (request-bindings req))))
+
+4.3回应
+(require web-server/http/response-structs)						package: web-server-lib
+
+(struct response (code message seconds mime headers output))
+  code : number?
+  message : bytes?
+  seconds : number?
+  mime : (or/c false/c bytes?)
+  headers : (listof header?)
+  output : (output-port? . -> . void)													结构
+HTTP响应，其中输出通过写入输出端口来生成主体。 代码是响应代码，消息消息，秒生成时间，MIME MIME类型的文件，headers是头。
+如果头不包括Date，Last-Modified或Server头，则服务器将自动添加它们，其中Date基于当前秒，Last-Modified基于秒，Server为Racket。
+如果头部不包括Content-Type并且mime不是#f，则mime被添加为Content-Type头部。
+如果需要确保连接将被关闭，服务器将始终替换您的Connection头。 （通常使用HTTP / 1.0客户端。）例子：
+(response
+ 301 #"OK"
+ (current-seconds) TEXT/HTML-MIME-TYPE
+ empty
+ (λ (op) (write-bytes #"<html><body>Hello, World!</body></html>" op)))
+(response
+ 301 #"Moved Permanently"
+ (current-seconds) TEXT/HTML-MIME-TYPE
+ (list (make-header #"Location"
+                    #"http://racket-lang.org/download"))
+ (λ (op) (write-bytes #"Moved" op)))
+(response
+ 304 #"Not Modified"
+ (current-seconds) #f
+ (list (make-header #"Location"
+                    #"http://racket-lang.org/download"))
+ void)
+
+(response/full	 	code	 	 	 	 
+     	 	message	 	 	 	 
+     	 	seconds	 	 	 	 
+     	 	mime	 	 	 	 
+     	 	headers	 	 	 	 
+     	 	body)	 	→	 	response?
+  code : number?
+  message : bytes?
+  seconds : number?
+  mime : (or/c false/c bytes?)
+  headers : (listof header?)
+  body : (listof bytes?)																程序
+响应的构造函数，其中body是响应体。
+例：
+(response/full
+ 301 #"Moved Permanently"
+ (current-seconds) TEXT/HTML-MIME-TYPE
+ (list (make-header #"Location"
+                    #"http://racket-lang.org/download"))
+ (list #"<html><body><p>"
+       #"Please go to <a href=\""
+       #"http://racket-lang.org/download"
+       #"\">here</a> instead."
+       #"</p></body></html>"))
+
+(response/output	 	output	 	 	 	 
+     	 [	#:code code	 	 	 	 
+     	 	#:message message	 	 	 	 
+     	 	#:seconds seconds	 	 	 	 
+     	 	#:mime-type mime-type	 	 	 	 
+     	 	#:headers headers])	 	→	 	response?
+
+  output : (-> output-port? void?)
+  code : number? = 200
+  message : bytes? = #"Okay"
+  seconds : number? = (current-seconds)
+  mime-type : (or/c bytes? #f) = TEXT/HTML-MIME-TYPE
+  headers : (listof header?) = '()
+相当于
+    (response code message seconds mime-type headers output)
+
+TEXT/HTML-MIME-TYPE : bytes?													值
+相当于#"text/html; charset=utf-8"。
+警告：如果在响应中包含不准确的Content-Length头，则传输中将出现服务器无法捕获的错误。
+
+4.4放置Cookie
+(require web-server/http/cookie)								package: web-server-lib
+此模块提供创建Cookie和响应设置它们的功能。
+
+(make-cookie	 	name	 	 	 	 
+     	 	value	 	 	 	 
+     	 [	#:comment comment	 	 	 	 
+     	 	#:domain domain	 	 	 	 
+     	 	#:max-age max-age	 	 	 	 
+     	 	#:path path	 	 	 	 
+     	 	#:expires expires	 	 	 	 
+     	 	#:secure? secure?])	 	→	 	cookie?
+  name : cookie-name?
+  value : cookie-value?
+  comment : (or/c false/c string?) = #f
+  domain : (or/c false/c valid-domain?) = #f
+  max-age : (or/c false/c exact-nonnegative-integer?) = #f
+  path : (or/c false/c string?) = #f
+  expires : (or/c false/c string?) = #f
+  secure? : (or/c false/c boolean?) = #f												程序
+构造具有适当字段的cookie。
+
+(cookie->header c) → header?
+  c : cookie?																		程序
+构造一个设置cookie的头。
+例子：
+(define time-cookie
+  (make-cookie "time" (number->string (current-seconds))))
+(define id-cookie
+  (make-cookie "id" "joseph" #:secure? #t))
+ 
+(redirect-to
+ "http://localhost/logged-in"
+ see-other
+ #:headers
+ (map cookie->header
+      (list time-cookie id-cookie)))
+ 
+(send/suspend
+ (lambda (k-url)
+   (response/xexpr
+    #:cookies (list time-cookie id-cookie)
+    `(html (head (title "Cookie Example"))
+           (body (h1 "You're cookie'd!"))))))
+
+4.5已验证的Cookie
+(require web-server/http/id-cookie)							package: web-server-lib
+Cookie对于存储用户浏览器的信息是有用的，并且对于存储用于认证，会话等的识别信息特别有用。然而，当使用cookie作为认证者时存在固有的困难，因为cookie数据完全由用户控制，因此不能被信任。
+此模块提供用于创建和验证本地时间戳的已验证Cookie的功能。它是基于由MIT Cookie Eaters提出的算法：如果你在thime authored-seconds存储数据数据，那么用户将收到digest＆authored-seconds＆data，其中digest是一个HMAC-SHA1摘要的创作秒和数据，使用任意秘密密钥。当您收到Cookie时，它将重新验证此摘要，并检查该Cookie的创作秒数是否超过超时时间，然后才将Cookie数据返回给程序。
+接口将密钥表示为字节字符串。生成这个的最好的方法是使用像OpenSSL或/dev/random这样的随机字节。此常见问题列出了几个选项。一个方便的纯基于Racket的选项是可用的（make-secret-salt/file），但如果你关心这种事情，它不会有那么好的熵。
+
+(make-id-cookie	 	name	 	 	 	 
+     	 	secret-salt	 	 	 	 
+     	 	value	 	 	 	 
+     	 [	#:path path])	 	→	 	cookie?
+  name : cookie-name?
+  secret-salt : bytes?
+  value : cookie-value?
+  path : (or/c false/c string?) = #f													程序
+生成一个经过身份验证的名为name的cookie，包含使用secret-salt签名的值。
+
+(request-id-cookie	 	name	 
+     	 	secret-salt	 
+     	 	request	 
+     	 	#:timeout timeout)	 
+ → (or/c false/c cookie-value?)
+  name : cookie-name?
+  secret-salt : bytes?
+  request : request?
+  timeout : +inf.0																	程序
+在请求超时之前提取先前使用secret-salt签名的名为name的第一个已验证cookie。 如果没有有效的Cookie可用，则返回#f。
+
+(logout-id-cookie name [#:path path]) → cookie?
+  name : cookie-name?
+  path : (or/c false/c string?) = #f													程序
+生成未经有效身份验证的名为name的Cookie。
+这将导致非恶意浏览器覆盖以前设置的Cookie。 如果您使用经过身份验证的Cookie登录信息，您可以发送此信息以导致“注销”。 然而，恶意浏览器不需要尊重这样的覆盖。 因此，这不是在公共（即可能受损）计算机上实现超时或保护用户的有效方式。 安全地注销受感染计算机的唯一方法是让服务器端状态保持跟踪哪些Cookie（会话等）无效。 根据您的应用程序，跟踪实时会话或过期会话可能更好，或者永远不要设置开始的cookie，而只使用扩展，您可以使用send/finish撤消。
+
+(make-secret-salt/file secret-salt-path) → bytes?
+  secret-salt-path : path-string?														程序
+从secret-salt-path中提取字节。 如果secret-salt-path不存在，那么它被创建并用128个随机字节初始化。
+
+4.6提取Cookie
+(require web-server/http/cookie-parse)						package: web-server-lib
+
+(struct	 	client-cookie (name value domain path)
+    #:extra-constructor-name make-client-cookie)
+  name : string?
+  value : string?
+  domain : (or/c false/c valid-domain?)
+  path : (or/c false/c string?)														结构
+虽然服务器cookie用cookie?表示，但是来自客户端的cookie用client-cookie结构来表示。
+
+(request-cookies req) → (listof client-cookie?)
+  req : request?																		程序
+从req的标头中提取Cookie。
+例子：
+(define (start req)
+  (define cookies (request-cookies req))
+  (define id-cookie
+    (findf (lambda (c)
+             (string=? "id" (client-cookie-name c)))
+           cookies))
+  (if id-cookie
+      (hello (client-cookie-value id-cookie))
+      (redirect-to
+       (url->string (request-uri req))
+       see-other
+       #:headers
+       (list
+        (cookie->header (make-cookie "id" "joseph"))))))
+ 
+ (define (hello who)
+   (response/xexpr
+    `(html (head (title "Hello!"))
+           (body
+            (h1 "Hello "
+                ,who)))))
+
+4.7重定向
+(require web-server/http/redirect)								package: web-server-lib
+
+(redirect-to	 	uri	 	 	 	 
+     	 [	perm/temp	 	 	 	 
+     	 	#:headers headers])	 	→	 	response?
+  uri : non-empty-string?
+  perm/temp : redirection-status? = temporarily
+  headers : (listof header?) = (list)													程序
+生成一个HTTP响应，将浏览器重定向到uri，同时在响应中包含标头。
+示例：
+（redirect-to“http://www.add-three-numbers.com”permanent）
+
+(redirection-status? v) → boolean?
+  v : any/c																			程序
+确定v是否为以下值之一。
+
+permanently : redirection-status?													值
+redirection-status?用于永久重定向。
+
+temporarily : redirection-status?													值
+redirection-status? 用于临时重定向。
+
+see-other : redirection-status?														值
+redirection-status? 用于“看其他”重定向。
+
+4.8基本认证
+(require web-server/http/basic-auth)							package: web-server-lib
+HTTP基本认证的实现。
+
+(make-basic-auth-header realm) → header?
+  realm : string?																	程序
+返回一个标题，指示Web浏览器使用基本身份验证，将realm作为域，从客户端请求用户名和密码。
+
+(request->basic-credentials req)
+ → (or/c false/c (cons/c bytes? bytes?))
+  req : request?																		程序
+如果req中存在认证头，则返回一对用户名和密码，或者#f。
+例子：
+#lang web-server/insta
+ 
+(define (start req)
+  (match (request->basic-credentials req)
+    [(cons user pass)
+     (response/xexpr
+      `(html (head (title "Basic Auth Test"))
+             (body (h1 "User: " ,(bytes->string/utf-8 user))
+                   (h1 "Pass: " ,(bytes->string/utf-8 pass)))))]
+    [else
+     (response
+      401 #"Unauthorized" (current-seconds) TEXT/HTML-MIME-TYPE
+      (list
+       (make-basic-auth-header
+        (format "Basic Auth Test: ~a" (gensym))))
+      void)]))
+
+4.9摘要验证
+(require web-server/http/digest-auth)							package: web-server-lib
+HTTP摘要认证的实现。
+
+(make-digest-auth-header	 	realm	 	 	 	 
+     	 	private-key	 	 	 	 
+     	 	opaque)	 	→	 	header?
+  realm : string?
+  private-key : string?
+  opaque : string?																	程序
+返回一个标题，指示Web浏览器从客户端请求使用Digest身份验证的用户名和密码，realm作为域，private-key作为服务器对nonce的贡献，opaque作为透明的数据通过客户端。
+
+(request->digest-credentials req)
+ → (or/c false/c (listof (cons/c symbol? string?)))
+  req : request?																		程序
+将req中的Digest凭证（如果它们显示）作为关联列表返回。
+
+username*realm->password/c : contract?											值
+通常为用户查找密码是一个领域。
+相当于（ - > string？string？string？）。
+
+username*realm->digest-HA1/c : contract?										值
+用于计算用户的秘密哈希值。
+相当于（ - > string？string？bytes？）。
+
+(password->digest-HA1 lookup-password)
+ → username*realm->digest-HA1/c
+  lookup-password : username*realm→password/c								程序
+使用lookup-password查找密码，然后计算它的秘密哈希值。
+
+(make-check-digest-credentials lookup-HA1)
+ → (string? (listof (cons/c symbol? string?)) . -> . boolean?)
+  lookup-HA1 : username*realm→digest-HA1/c									程序
+构造一个函数，该函数检查在提供作为第一个参数的HTTP方法和由lookup-HA1计算的秘密哈希值时，特定Digest凭据（返回函数的第二个参数）是否正确。
+如果摘要凭证部分缺少，这将导致异常。
+例：
+#lang web-server/insta
+(require racket/pretty)
+ 
+(define private-key "private-key")
+(define opaque "opaque")
+ 
+(define (start req)
+  (match (request->digest-credentials req)
+    [#f
+     (response
+      401 #"Unauthorized" (current-seconds) TEXT/HTML-MIME-TYPE
+      (list (make-digest-auth-header
+             (format "Digest Auth Test: ~a" (gensym))
+             private-key opaque))
+      void)]
+    [alist
+     (define check
+       (make-check-digest-credentials
+        (password->digest-HA1 (lambda (username realm) "pass"))))
+     (define pass?
+       (check "GET" alist))
+     (response/xexpr
+      `(html (head (title "Digest Auth Test"))
+             (body
+              (h1 ,(if pass? "Pass!" "No Pass!"))
+              (pre ,(pretty-format alist)))))]))
+
+4.10 X表达式支持
+(require web-server/http/xexpr)								package: web-server-lib
+
+(response/xexpr	 	xexpr	 	 	 	 
+     	 [	#:code code	 	 	 	 
+     	 	#:message message	 	 	 	 
+     	 	#:seconds seconds	 	 	 	 
+     	 	#:mime-type mime-type	 	 	 	 
+     	 	#:headers headers	 	 	 	 
+     	 	#:cookies cookies	 	 	 	 
+     	 	#:preamble preamble])	 	→	 	response?
+  xexpr : xexpr/c
+  code : number? = 200
+  message : bytes? = #"Okay"
+  seconds : number? = (current-seconds)
+  mime-type : (or/c false/c bytes?) = TEXT/HTML-MIME-TYPE
+  headers : (listof header?) = empty
+  cookies : (listof cookie?) = empty
+  preamble : bytes? = #""															程序
+相当于
+(response/full
+ code message seconds mime-type
+ (append headers (map cookie->header cookies))
+ (list preamble (string->bytes/utf-8 (xexpr->string xexpr))))
+这是一个可行的函数传递给set-any-> response!
